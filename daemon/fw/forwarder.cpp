@@ -36,6 +36,8 @@
 #include <ndn-cxx/lp/pit-token.hpp>
 #include <ndn-cxx/lp/tags.hpp>
 
+#include "face/null-face.hpp"
+
 namespace nfd {
 
 NFD_LOG_INIT(Forwarder);
@@ -55,7 +57,10 @@ Forwarder::Forwarder(FaceTable& faceTable)
   , m_pit(m_nameTree)
   , m_measurements(m_nameTree)
   , m_strategyChoice(*this)
+  , m_csFace(face::makeNullFace(FaceUri("contentstore://")))
 {
+  getFaceTable().addReserved(m_csFace, face::FACEID_CONTENT_STORE);
+
   m_faceTable.afterAdd.connect([this] (const Face& face) {
     face.afterReceiveInterest.connect(
       [this, &face] (const Interest& interest, const EndpointId& endpointId) {
@@ -241,6 +246,9 @@ Forwarder::onContentStoreHit(const Interest& interest, const FaceEndpoint& ingre
   // set PIT expiry timer to now
   this->setExpiryTimer(pitEntry, 0_ms);
 
+  beforeSatisfyInterest(*pitEntry, *m_csFace, data);
+  m_strategyChoice.findEffectiveStrategy(*pitEntry).beforeSatisfyInterest(data, FaceEndpoint(*m_csFace, 0), pitEntry);
+
   // dispatch to strategy: after Content Store hit
   m_strategyChoice.findEffectiveStrategy(*pitEntry).afterContentStoreHit(data, ingress, pitEntry);
 }
@@ -274,6 +282,10 @@ Forwarder::onInterestFinalize(const shared_ptr<pit::Entry>& pitEntry)
 {
   NFD_LOG_DEBUG("onInterestFinalize interest=" << pitEntry->getName()
                 << (pitEntry->isSatisfied ? " satisfied" : " unsatisfied"));
+
+  if (!pitEntry->isSatisfied) {
+    beforeExpirePendingInterest(*pitEntry);
+  }
 
   // Dead Nonce List insert if necessary
   this->insertDeadNonceList(*pitEntry, nullptr);
@@ -328,6 +340,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     // set PIT expiry timer to now
     this->setExpiryTimer(pitEntry, 0_ms);
 
+    beforeSatisfyInterest(*pitEntry, ingress.face, data);
     // trigger strategy: after receive Data
     m_strategyChoice.findEffectiveStrategy(*pitEntry).afterReceiveData(data, ingress, pitEntry);
 
@@ -361,6 +374,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       this->setExpiryTimer(pitEntry, 0_ms);
 
       // invoke PIT satisfy callback
+      beforeSatisfyInterest(*pitEntry, ingress.face, data);
       m_strategyChoice.findEffectiveStrategy(*pitEntry).beforeSatisfyInterest(data, ingress, pitEntry);
 
       // mark PIT satisfied
