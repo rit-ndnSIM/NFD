@@ -192,6 +192,7 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
 {
   NFD_LOG_DEBUG("onContentStoreMiss interest=" << interest.getName());
   ++m_counters.nCsMisses;
+  afterCsMiss(interest);
 
   // attach HopLimit if configured and not present in Interest
   if (m_config.defaultHopLimit > 0 && !interest.getHopLimit()) {
@@ -235,6 +236,7 @@ Forwarder::onContentStoreHit(const Interest& interest, const FaceEndpoint& ingre
 {
   NFD_LOG_DEBUG("onContentStoreHit interest=" << interest.getName());
   ++m_counters.nCsHits;
+  afterCsHit(interest, data);
 
   data.setTag(make_shared<lp::IncomingFaceIdTag>(face::FACEID_CONTENT_STORE));
   data.setTag(interest.getTag<lp::PitToken>());
