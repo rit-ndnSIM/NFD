@@ -150,6 +150,15 @@ Strategy::Strategy(Forwarder& forwarder)
 
 Strategy::~Strategy() = default;
 
+
+void
+Strategy::afterReceiveLoopedInterest(const FaceEndpoint& ingress, const Interest& interest,
+                                     pit::Entry& pitEntry)
+{
+  NFD_LOG_DEBUG("afterReceiveLoopedInterest pitEntry=" << pitEntry.getName()
+                << " in=" << ingress);
+}
+
 void
 Strategy::afterContentStoreHit(const Data& data, const FaceEndpoint& ingress,
                                const shared_ptr<pit::Entry>& pitEntry)

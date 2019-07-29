@@ -151,7 +151,8 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
   }
   if (hasDuplicateNonceInPit) {
     // goto Interest loop pipeline
-    this->onInterestLoop(interest, ingress);
+    this->onInterestLoop(ingress, interest);
+    m_strategyChoice.findEffectiveStrategy(*pitEntry).afterReceiveLoopedInterest(ingress, interest, *pitEntry);
     return;
   }
 

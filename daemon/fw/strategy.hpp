@@ -147,52 +147,56 @@ public: // triggers
   afterReceiveInterest(const Interest& interest, const FaceEndpoint& ingress,
                        const shared_ptr<pit::Entry>& pitEntry) = 0;
 
-  /**
-   * \brief Trigger after a matching Data is found in the Content Store.
+
+  /** \brief trigger after a looped Interest is received
    *
-   * In the base class, this method sends \p data to \p ingress.
-   *
-   * \warning The strategy must not retain a copy of the \p pitEntry shared_ptr after this function
-   *          returns, otherwise undefined behavior may occur. However, the strategy is allowed to
-   *          construct and keep a weak_ptr to \p pitEntry.
+   *  The Interest:
+   *  - does not violate Scope
+   *  - IS looped
+   *  - cannot be satisfied by ContentStore
+   *  - is under a namespace managed by this strategy
    */
   virtual void
-  afterContentStoreHit(const Data& data, const FaceEndpoint& ingress,
-                       const shared_ptr<pit::Entry>& pitEntry);
+  afterReceiveLoopedInterest(const FaceEndpoint& ingress, const Interest& interest,
+                             pit::Entry& pitEntry);
 
-  /**
-   * \brief Trigger before a PIT entry is satisfied.
+  /** \brief trigger before PIT entry is satisfied
    *
-   * This trigger is invoked when an incoming Data satisfies more than one PIT entry.
-   * The strategy can collect measurements information, but cannot manipulate Data forwarding.
-   * When an incoming Data satisfies only one PIT entry, afterReceiveData() is invoked instead
-   * and given full control over Data forwarding. If a strategy does not override afterReceiveData(),
-   * the default implementation invokes beforeSatisfyInterest().
+   *  This trigger is invoked when an incoming Data satisfies more than one PIT entry.
+   *  The strategy can collect measurements information, but cannot manipulate Data forwarding.
+   *  When an incoming Data satisfies only one PIT entry, \c afterReceiveData is invoked instead
+   *  and given full control over Data forwarding. If a strategy does not override \c afterReceiveData,
+   *  the default implementation invokes \c beforeSatisfyInterest.
    *
-   * Normally, PIT entries are erased after receiving the first matching Data.
-   * If the strategy wishes to collect responses from additional upstream nodes,
-   * it should invoke setExpiryTimer() within this function to prolong the PIT entry lifetime.
-   * If a Data arrives from another upstream during the extended PIT entry lifetime, this trigger
-   * will be invoked again. At that time, the strategy must invoke setExpiryTimer() again to
-   * continue collecting more responses.
+   *  Normally, PIT entries would be erased after receiving the first matching Data.
+   *  If the strategy wishes to collect responses from additional upstream nodes,
+   *  it should invoke \c setExpiryTimer within this function to prolong the PIT entry lifetime.
+   *  If a Data arrives from another upstream during the extended PIT entry lifetime, this trigger will be invoked again.
+   *  At that time, this function must invoke \c setExpiryTimer again to continue collecting more responses.
    *
-   * In the base class, this method does nothing.
+   *  In this base class this method does nothing.
    *
-   * \warning The strategy must not retain a copy of the \p pitEntry shared_ptr after this function
-   *          returns, otherwise undefined behavior may occur. However, the strategy is allowed to
-   *          construct and keep a weak_ptr to \p pitEntry.
+   *  \warning The strategy must not retain shared_ptr<pit::Entry>, otherwise undefined behavior
+   *           may occur. However, the strategy is allowed to store weak_ptr<pit::Entry>.
    */
   virtual void
-  beforeSatisfyInterest(const Data& data, const FaceEndpoint& ingress,
-                        const shared_ptr<pit::Entry>& pitEntry);
+  beforeSatisfyInterest(const shared_ptr<pit::Entry>& pitEntry,
+                        const FaceEndpoint& ingress, const Data& data);
 
-  /**
-   * \brief Trigger after Data is received.
+  /** \brief trigger after a Data is matched in CS
    *
-   * This trigger is invoked when an incoming Data satisfies exactly one PIT entry,
-   * and gives the strategy full control over Data forwarding.
+   *  In the base class this method sends \p data to \p ingress
+   */
+  virtual void
+  afterContentStoreHit(const shared_ptr<pit::Entry>& pitEntry,
+                       const FaceEndpoint& ingress, const Data& data);
+
+  /** \brief trigger after Data is received
    *
-   * When this trigger is invoked:
+   *  This trigger is invoked when an incoming Data satisfies exactly one PIT entry,
+   *  and gives the strategy full control over Data forwarding.
+   *
+   *  When this trigger is invoked:
    *  - The Data has been verified to satisfy the PIT entry.
    *  - The PIT entry expiry timer is set to now
    *
