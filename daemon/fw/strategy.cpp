@@ -160,13 +160,46 @@ Strategy::afterReceiveLoopedInterest(const FaceEndpoint& ingress, const Interest
 }
 
 void
+Strategy::beforeSatisfyInterest(const Data& data, const FaceEndpoint& ingress,
+                                const shared_ptr<pit::Entry>& pitEntry)
+{
+    NFD_LOG_DEBUG("beforeSatisfyInterest pitEntry=" << pitEntry->getName()
+                  << " in=" << ingress << " data=" << data.getName());
+}
+
+void
+Strategy::satisfyInterest(const shared_ptr<pit::Entry>& pitEntry,
+                          const FaceEndpoint& ingress, const Data& data,
+                          std::set<std::pair<Face*, EndpointId>>& satisfiedDownstreams,
+                          std::set<std::pair<Face*, EndpointId>>& unsatisfiedDownstreams)
+{
+  NFD_LOG_DEBUG("satisfyInterest pitEntry=" << pitEntry->getName()
+                << " in=" << ingress << " data=" << data.getName());
+
+  NFD_LOG_DEBUG("onIncomingData matching=" << pitEntry->getName());
+
+  auto now = time::steady_clock::now();
+
+  // remember pending downstreams
+  for (const pit::InRecord& inRecord : pitEntry->getInRecords()) {
+    if (inRecord.getExpiry() > now) {
+      satisfiedDownstreams.emplace(&inRecord.getFace(), 0);
+    }
+  }
+
+  // invoke PIT satisfy callback
+  beforeSatisfyInterest(pitEntry, ingress, data);
+}
+
+
+void
 Strategy::afterContentStoreHit(const Data& data, const FaceEndpoint& ingress,
                                const shared_ptr<pit::Entry>& pitEntry)
 {
-  NFD_LOG_DEBUG("afterContentStoreHit pitEntry=" << pitEntry->getName()
-                << " in=" << ingress << " data=" << data.getName());
+    NFD_LOG_DEBUG("afterContentStoreHit pitEntry=" << pitEntry->getName()
+                  << " in=" << ingress << " data=" << data.getName());
 
-  this->sendData(data, ingress.face, pitEntry);
+    this->sendData(data, ingress.face, pitEntry);
 }
 
 void

@@ -183,6 +183,13 @@ public: // triggers
   beforeSatisfyInterest(const shared_ptr<pit::Entry>& pitEntry,
                         const FaceEndpoint& ingress, const Data& data);
 
+
+  virtual void
+  satisfyInterest(const shared_ptr<pit::Entry>& pitEntry,
+                  const FaceEndpoint& ingress, const Data& data,
+                  std::set<std::pair<Face*, EndpointId>>& satisfiedDownstreams,
+                  std::set<std::pair<Face*, EndpointId>>& unsatisfiedDownstreams);
+
   /** \brief trigger after a Data is matched in CS
    *
    *  In the base class this method sends \p data to \p ingress
