@@ -272,7 +272,15 @@ Strategy::sendData(const Data& data, Face& egress, const shared_ptr<pit::Entry>&
     data2.setTag(pitToken);
     return m_forwarder.onOutgoingData(data2, egress);
   }
-  return m_forwarder.onOutgoingData(data, egress);
+  m_forwarder.onOutgoingData(data, egress);
+
+  if (pitEntry->getInRecords().empty()) { // if nothing left, "closing down" the entry
+    // set PIT expiry timer to now
+    m_forwarder.setExpiryTimer(pitEntry, 0_ms);
+
+    // mark PIT satisfied
+    pitEntry->isSatisfied = true;
+  }
 }
 
 void
@@ -295,6 +303,14 @@ Strategy::sendDataToAll(const Data& data, const shared_ptr<pit::Entry>& pitEntry
   for (const auto& pendingDownstream : pendingDownstreams) {
     this->sendData(data, *pendingDownstream, pitEntry);
   }
+
+  pitEntry->clearInRecords();
+
+  // set PIT expiry timer to now
+  m_forwarder.setExpiryTimer(pitEntry, 0_ms);
+
+  // mark PIT satisfied
+  pitEntry->isSatisfied = true;
 }
 
 void
