@@ -151,7 +151,7 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
   }
   if (hasDuplicateNonceInPit) {
     // goto Interest loop pipeline
-    this->onInterestLoop(ingress, interest);
+    this->onInterestLoop(interest, ingress);
     m_strategyChoice.findEffectiveStrategy(*pitEntry).afterReceiveLoopedInterest(ingress, interest, *pitEntry);
     return;
   }
@@ -344,11 +344,8 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     beforeSatisfyInterest(*pitEntry, ingress.face, data);
 
     std::set<std::pair<Face*, EndpointId>> unsatisfiedDownstreams;
-    this->dispatchToStrategy(*pitEntry,
-                             [&] (fw::Strategy& strategy) {
-                               strategy.satisfyInterest(pitEntry, ingress, data,
-                                                        satisfiedDownstreams, unsatisfiedDownstreams);
-                             });
+    m_strategyChoice.findEffectiveStrategy(*pitEntry).satisfyInterest(pitEntry, ingress, data,
+                                                                      satisfiedDownstreams, unsatisfiedDownstreams);
     for (const auto& endpoint : unsatisfiedDownstreams) {
       unsatisfiedPitEntries.emplace(endpoint, pitEntry);
     }
@@ -399,7 +396,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       continue;
     }
 
-    this->onOutgoingData(data, FaceEndpoint(*downstream.first, downstream.second));
+    this->onOutgoingData(data, *downstream.first);
   }
 }
 

@@ -188,7 +188,7 @@ Strategy::satisfyInterest(const shared_ptr<pit::Entry>& pitEntry,
   }
 
   // invoke PIT satisfy callback
-  beforeSatisfyInterest(pitEntry, ingress, data);
+  beforeSatisfyInterest(data, ingress, pitEntry);
 }
 
 
@@ -200,14 +200,6 @@ Strategy::afterContentStoreHit(const Data& data, const FaceEndpoint& ingress,
                   << " in=" << ingress << " data=" << data.getName());
 
     this->sendData(data, ingress.face, pitEntry);
-}
-
-void
-Strategy::beforeSatisfyInterest(const Data& data, const FaceEndpoint& ingress,
-                                const shared_ptr<pit::Entry>& pitEntry)
-{
-  NFD_LOG_DEBUG("beforeSatisfyInterest pitEntry=" << pitEntry->getName()
-                << " in=" << ingress << " data=" << data.getName());
 }
 
 void

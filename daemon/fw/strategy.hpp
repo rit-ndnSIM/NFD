@@ -180,8 +180,8 @@ public: // triggers
    *           may occur. However, the strategy is allowed to store weak_ptr<pit::Entry>.
    */
   virtual void
-  beforeSatisfyInterest(const shared_ptr<pit::Entry>& pitEntry,
-                        const FaceEndpoint& ingress, const Data& data);
+  beforeSatisfyInterest(const Data& data, const FaceEndpoint& ingress,
+                        const shared_ptr<pit::Entry>& pitEntry);
 
 
   virtual void
@@ -195,8 +195,8 @@ public: // triggers
    *  In the base class this method sends \p data to \p ingress
    */
   virtual void
-  afterContentStoreHit(const shared_ptr<pit::Entry>& pitEntry,
-                       const FaceEndpoint& ingress, const Data& data);
+  afterContentStoreHit(const Data& data, const FaceEndpoint& ingress,
+                        const shared_ptr<pit::Entry>& pitEntry);
 
   /** \brief trigger after Data is received
    *

@@ -150,7 +150,7 @@ public:
    */
   signal::Signal<Forwarder, Interest> afterCsMiss;
 
-PUBLIC_WITH_TESTS_ELSE_PRIVATE: // pipelines
+NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE: // pipelines
   /** \brief incoming Interest pipeline
    *  \param interest the incoming Interest, must be well-formed and created with make_shared
    *  \param ingress face on which \p interest was received and endpoint of the sender
