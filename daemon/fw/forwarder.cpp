@@ -96,6 +96,23 @@ Forwarder::~Forwarder() = default;
 void
 Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingress)
 {
+  // get first part of the name, if it equals /interCACHE and it's coming from a local face (our application), then print INFO message
+  // this effectively counts the number of interest packets that are generated at the consumer (including the custom forwarders)
+  ndn::Name simpleName;
+  simpleName = (interest.getName()).getPrefix(1); // get just the first component of the name, and convert to Uri string
+  std::string simpleStringName = simpleName.toUri();
+  if (simpleStringName == "/interCACHE")
+  {
+    if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+    {
+      NFD_LOG_INFO("     CABEEE: onIncomingInterestFromApp (from consuming application only) =" << " name=" << interest.getName());
+    }
+    else
+    {
+      NFD_LOG_INFO("     CABEEE: onIncomingInterestFromFace (from another NFD node on a physical face) =" << " name=" << interest.getName());
+    }
+  }
+
   // receive Interest
   NFD_LOG_DEBUG("onIncomingInterest in=" << ingress << " interest=" << interest.getName());
   interest.setTag(make_shared<lp::IncomingFaceIdTag>(ingress.face.getId()));
@@ -418,6 +435,22 @@ Forwarder::onDataUnsolicited(const Data& data, const FaceEndpoint& ingress)
 bool
 Forwarder::onOutgoingData(const Data& data, Face& egress)
 {
+  // get first part of the name, if it equals /interCACHE and it's going to a local face (our application), then print INFO message
+  // this effectively counts the number of data packets that are arriving at their consumer
+  ndn::Name simpleName;
+  simpleName = (data.getName()).getPrefix(1); // get just the first component of the name, and convert to Uri string
+  std::string simpleStringName = simpleName.toUri();
+  if (simpleStringName == "/interCACHE")
+  {
+    if (egress.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+    {
+      NFD_LOG_INFO("     CABEEE: onOutgoingDataToApp (to the consuming application only) =" << " name=" << data.getName());
+    }
+    else
+    {
+      NFD_LOG_INFO("     CABEEE: onOutgoingDataToFace (to another NFD node on a physical face) =" << " name=" << data.getName());
+    }
+  }
   if (egress.getId() == face::INVALID_FACEID) {
     NFD_LOG_WARN("onOutgoingData out=(invalid) data=" << data.getName());
     return false;
