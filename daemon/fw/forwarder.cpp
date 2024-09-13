@@ -212,6 +212,86 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
   ++m_counters.nCsMisses;
   afterCsMiss(interest);
 
+  // generate interest (/interCACHE/shortcutOPT) to all local application faces, containing DAG (application parameters).
+  // forwarder applications will look for this name, and generate interests early if they are hosting any upstream services from the one in this interest
+  Interest interestOPT("/interCACHE/shortcutOPT");
+  if (interest.hasApplicationParameters())
+  {
+    interestOPT.setApplicationParameters(interest.getApplicationParameters());
+  }
+  ndn::Name simpleName;
+  simpleName = (interest.getName()).getPrefix(1); // get just the first component of the name, and convert to Uri string
+  std::string simpleStringName = simpleName.toUri();
+  if (simpleStringName == "/interCACHE")
+  //if (0)
+  {
+    NFD_LOG_DEBUG("CABEEEshortcutOPT, sending /shortcutOPT interest to apps on local faces to generate new interests for inputs into locally hosted services.");
+
+    //look at FIB, and see if any services are hosted on a local face. If so, send interestOPT out through that face.
+    for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+    {
+      NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
+      ndn::Name entryName;
+      entryName = fib_iterator->getPrefix();
+      entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/interCACHE only)
+      std::string entryString = entryName.toUri();
+      if (entryString == "/interCACHE")
+      {
+        NFD_LOG_DEBUG("CABEEEshortcutOPT, fib entry has interCACHE name\n");
+        if (fib_iterator->hasNextHops())
+        {
+          // figure out the faceID of all the nexthops in the list, and send interest to ones that are local
+          //fib::NextHopList hopList = fib_iterator->getNextHops();
+          const fib::NextHopList& hopList = fib_iterator->getNextHops();
+          //for (auto &hop_iterator : hopList)
+          for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+          //for (nfd::fib::NextHopList::const_iterator hop_iterator = fib_iterator->getNextHops().begin(); hop_iterator != fib_iterator->getNextHops().end(); ++hop_iterator)
+          {
+            NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at all hops for this fib entry\n");
+            //Face thisFace = hop_iterator->getFace();
+            //if (thisFace.getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL)
+            //{
+              //thisFace.sendInterest(interestOPT);
+            //}
+            if (hop_iterator->getFace().getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL)
+            {
+              NFD_LOG_DEBUG("CABEEEshortcutOPT, generating interest " << interestOPT << ", for local face with faceID: " << hop_iterator->getFace().getId());
+              hop_iterator->getFace().sendInterest(interestOPT);
+            }
+          }
+        }
+      }
+    }
+
+
+/*
+    FaceId maxID = 0;
+    for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+    {
+      Face* localFace = &*it;
+      if (localFace->getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL) {
+        NFD_LOG_DEBUG("cabeee CABEEEshortcutOPT, looking at local face " << localFace << " with faceID: " << localFace->getId());
+        if (localFace->getId() > maxID) // TODO: this is a REALLY bad way of doing this. I'm hardcoding it just to see if it works.
+        {
+          maxID = localFace->getId();
+        }
+      }
+    }
+    NFD_LOG_DEBUG("cabeee CABEEEshortcutOPT, maxID: " << maxID );
+    for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+    {
+      Face* localFace = &*it;
+      NFD_LOG_DEBUG("cabeee CABEEEshortcutOPT, for generation, looking at local face " << localFace << " with faceID: " << localFace->getId());
+      if (localFace->getId() == maxID) // TODO: this is a REALLY bad way of doing this. I'm hardcoding it just to see if it works.
+      {
+        NFD_LOG_DEBUG("cabeee CABEEEshortcutOPT, generating interest " << interestOPT << ", for local face " << localFace << " with faceID: " << localFace->getId());
+        localFace->sendInterest(interestOPT);
+      }
+    }
+*/
+
+  }
+
   // attach HopLimit if configured and not present in Interest
   if (m_config.defaultHopLimit > 0 && !interest.getHopLimit()) {
     const_cast<Interest&>(interest).setHopLimit(m_config.defaultHopLimit);
