@@ -101,7 +101,7 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
   ndn::Name simpleName;
   simpleName = (interest.getName()).getPrefix(1); // get just the first component of the name, and convert to Uri string
   std::string simpleStringName = simpleName.toUri();
-  if (simpleStringName == "/nesco" || simpleStringName == "nescoSCOPT" || simpleStringName == "/orchA" || simpleStringName == "/orchB")
+  if (simpleStringName == "/nesco" || simpleStringName == "/nescoSCOPT" || simpleStringName == "/orchA" || simpleStringName == "/orchB")
   {
     if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
     {
@@ -512,7 +512,7 @@ Forwarder::onOutgoingData(const Data& data, Face& egress)
   ndn::Name simpleName;
   simpleName = (data.getName()).getPrefix(1); // get just the first component of the name, and convert to Uri string
   std::string simpleStringName = simpleName.toUri();
-  if (simpleStringName == "/nesco" || simpleStringName == "nescoSCOPT" || simpleStringName == "/orchA" || simpleStringName == "/orchB")
+  if (simpleStringName == "/nesco" || simpleStringName == "/nescoSCOPT" || simpleStringName == "/orchA" || simpleStringName == "/orchB")
   {
     if (egress.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
     {
