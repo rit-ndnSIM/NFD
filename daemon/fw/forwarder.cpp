@@ -38,6 +38,10 @@
 
 #include "face/null-face.hpp"
 
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
+
+
 namespace nfd {
 
 NFD_LOG_INIT(Forwarder);
@@ -244,7 +248,7 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
       // go to outgoing Interest pipeline
       // scope control is unnecessary, because privileged app explicitly wants to forward
       this->onOutgoingInterest(interest, *nextHopFace, pitEntry);
-      if (simpleStringName == "/nescoSCOPT")
+      if (simpleStringName == "/nescoSCOPT" && ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
         this->sendShortcutOPTinterests(interest, ingress, pitEntry);
     }
     return;
@@ -253,7 +257,7 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
   // dispatch to strategy: after receive Interest
   m_strategyChoice.findEffectiveStrategy(*pitEntry)
     .afterReceiveInterest(interest, FaceEndpoint(ingress.face, 0), pitEntry);
-  if (simpleStringName == "/nescoSCOPT")
+  if (simpleStringName == "/nescoSCOPT" && ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
     this->sendShortcutOPTinterests(interest, ingress, pitEntry);
 }
 
@@ -295,7 +299,19 @@ Forwarder::sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint
       entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
       std::string entryString = entryName.toUri();
       //NFD_LOG_DEBUG("CABEEEshortcutOPT, fib entry name component 0 is "<< entryString);
-      if (entryString == "/nescoSCOPT")
+
+      auto dagParameterFromInterest = interest.getApplicationParameters();
+      std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
+      json dagObject = json::parse(dagString);
+      ndn::Name serviceName;
+      serviceName = fib_iterator->getPrefix();
+      serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
+      std::string serviceString = serviceName.toUri();
+      //NFD_LOG_DEBUG("CABEEEshortcutOPT, fib entry name component 1 is "<< serviceString);
+      //NFD_LOG_DEBUG("CABEEEshortcutOPT, interest head is "<< dagObject["head"]);
+
+      // only generate shorcutOPT interest if the incoming interest is for /nescoSCOPT, and this fib entry is not for the service the interest is for (in which case the interest is forwarded to the service normally later on) 
+      if (entryString == "/nescoSCOPT" && serviceString != dagObject["head"])
       {
         //NFD_LOG_DEBUG("CABEEEshortcutOPT, fib entry has nescoSCOPT name\n");
         if (fib_iterator->hasNextHops())
