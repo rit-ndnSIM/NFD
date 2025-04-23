@@ -230,7 +230,10 @@ private:
    */
   void
   setExpiryTimer(const shared_ptr<pit::Entry>& pitEntry, time::milliseconds duration);
-  
+ 
+  void
+  sendCsUpdateInterest(const Data& data);
+
   void
   sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint& ingress,
                      const shared_ptr<pit::Entry>& pitEntry);

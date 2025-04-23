@@ -420,6 +420,108 @@ Forwarder::onInterestFinalize(const shared_ptr<pit::Entry>& pitEntry)
   m_pit.erase(pitEntry.get());
 }
 
+
+
+void
+Forwarder::sendCsUpdateInterest(const Data& data)
+{
+  // generate interest (/PREFIX/csUpdate) to the local application face where the csUpdater app is running, containing cached data name (not data content) as application parameters.
+  // csUpdate application will look for this name, and upon receiving will register the cached data name into RIB/FIB
+
+  shared_ptr<Interest> interestCsUpdate = make_shared<Interest>();
+  interestCsUpdate->setName("/nesco/csUpdate");
+
+  std::string csNameString = data.getName().toUri();
+  //std::cout << "csNameString: " << csNameString << std::endl;
+
+  // in order to convert from std::string to a char[] datatype we do the following (https://stackoverflow.com/questions/7352099/stdstring-to-char):
+  char *newCsNameString = new char[csNameString.length() + 1];
+  strcpy(newCsNameString, csNameString.c_str());
+  size_t length = strlen(newCsNameString);
+
+  //std::shared_ptr<ndn::Buffer> csNameApplicationParameters;
+  //std::istringstream is(csNameString);
+  //csNameApplicationParameters = ndn::io::loadBuffer(is, ndn::io::NO_ENCODING);
+  //interestCsUpdate->setApplicationParameters(csNameApplicationParameters);
+
+  interestCsUpdate->setApplicationParameters((const uint8_t *)newCsNameString, length);
+
+
+  char method = 1;
+  if(method==1) // iterate through all faces of this router, send interest to all local faces
+  {
+    for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it) {
+      Face* localFace = &*it;
+      if (localFace->getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL) {
+        NFD_LOG_DEBUG("cabeee csUpdate, generating interest " << interestCsUpdate << ", for local face " << localFace << std::endl);
+        //NFD_LOG_INFO("cabeee csUpdate, generating interest " << interestCsUpdate << ", for local face " << localFace << std::endl);
+        localFace->sendInterest(*interestCsUpdate);
+      }
+    }
+
+  }
+  /*
+  if (method==2) // iterate through all fib entries, then through all faces(hops) for each entry, and if entry is for /nescoSCOPT AND it is a local face, then send interest.
+  {
+    //NFD_LOG_DEBUG("cabeee csUpdate, sending /shortcutOPT interest to apps on local faces to generate new interests for inputs into locally hosted services.");
+
+    //look at FIB, and see if any services are hosted on a local face. If so, send interestCsUpdate out through that face.
+    for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+    {
+      //NFD_LOG_DEBUG("cabeee csUpdate, looking at fib entry\n");
+      ndn::Name entryName;
+      entryName = fib_iterator->getPrefix();
+      entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nesco only)
+      std::string entryString = entryName.toUri();
+      //NFD_LOG_DEBUG("cabeee csUpdate, fib entry name component 0 is "<< entryString);
+
+      auto dagParameterFromInterest = interest.getApplicationParameters();
+      std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
+      json dagObject = json::parse(dagString);
+      ndn::Name serviceName;
+      serviceName = fib_iterator->getPrefix();
+      serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
+      std::string serviceString = serviceName.toUri();
+      //NFD_LOG_DEBUG("cabeee csUpdate, fib entry name component 1 is "<< serviceString);
+      //NFD_LOG_DEBUG("cabeee csUpdate, interest head is "<< dagObject["head"]);
+
+      // only generate shorcutOPT interest if the incoming interest is for /nesco, and this fib entry is not for the service the interest is for (in which case the interest is forwarded to the service normally later on) 
+      if (entryString == "/nesco" && serviceString != dagObject["head"])
+      {
+        //NFD_LOG_DEBUG("cabeee csUpdate, fib entry has nesco name, and entry service name is not dagObject head!\n");
+        if (fib_iterator->hasNextHops())
+        {
+          // figure out the faceID of all the nexthops in the list, and send interest to ones that are local
+          //fib::NextHopList hopList = fib_iterator->getNextHops();
+          const fib::NextHopList& hopList = fib_iterator->getNextHops();
+          //for (auto &hop_iterator : hopList)
+          for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+          //for (nfd::fib::NextHopList::const_iterator hop_iterator = fib_iterator->getNextHops().begin(); hop_iterator != fib_iterator->getNextHops().end(); ++hop_iterator)
+          {
+            //NFD_LOG_DEBUG("cabeee csUpdate, looking at all hops for this fib entry\n");
+            //Face thisFace = hop_iterator->getFace();
+            //if (thisFace.getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL)
+            //{
+              //thisFace.sendInterest(interestCsUpdate);
+            //}
+            if (hop_iterator->getFace().getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL)
+            {
+              //interestCsUpdate->setName(fib_iterator->getPrefix()); // give it the hosted service name, instead of /nesco/csUpdate
+              ndn::Name scoptFullName;
+              scoptFullName = "/nesco/csUpdate" + fib_iterator->getPrefix().getSubName(1,1).toUri();
+              interestCsUpdate->setName(scoptFullName); // add the hosted service name to the full name: /nesco/csUpdate/<serviceName>
+              NFD_LOG_DEBUG("cabeee csUpdate, generating interest " << interestCsUpdate->getName().toUri() << ", for local face with faceID: " << hop_iterator->getFace().getId());
+              hop_iterator->getFace().sendInterest(*interestCsUpdate);
+            }
+          }
+        }
+      }
+    }
+  }
+  */
+}
+
+
 void
 Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 {
@@ -447,6 +549,87 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
   // CS insert
   m_cs.insert(data);
+
+  if (data.getName().getPrefix(1).toUri() == "/nesco")
+  {
+    if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL) { // only if data is coming from non-local face. (if coming from local, it's from a service, and thus there is no need to advertise)
+      this->sendCsUpdateInterest(data);
+    }
+  }
+
+
+/*
+  // register prefix for this new CS content
+  Ptr<GlobalRouter> gr = node->GetObject<GlobalRouter>();
+  NS_ASSERT_MSG(gr != 0, "GlobalRouter is not installed on the node");
+  auto name = make_shared<Name>(prefix);
+  gr->AddLocalPrefix(name);
+
+   //Implementation of route calculation is heavily based on Boost Graph Library
+   //See http://www.boost.org/doc/libs/1_49_0/libs/graph/doc/table_of_contents.html for more details
+
+  BOOST_CONCEPT_ASSERT((boost::VertexListGraphConcept<boost::NdnGlobalRouterGraph>));
+  BOOST_CONCEPT_ASSERT((boost::IncidenceGraphConcept<boost::NdnGlobalRouterGraph>));
+
+  boost::NdnGlobalRouterGraph graph;
+  // typedef graph_traits < NdnGlobalRouterGraph >::vertex_descriptor vertex_descriptor;
+
+  // For now we doing Dijkstra for every node.  Can be replaced with Bellman-Ford or Floyd-Warshall.
+  // Other algorithms should be faster, but they need additional EdgeListGraph concept provided by
+  // the graph, which
+  // is not obviously how implement in an efficient manner
+  for (NodeList::Iterator node = NodeList::Begin(); node != NodeList::End(); node++) {
+    Ptr<GlobalRouter> source = (*node)->GetObject<GlobalRouter>();
+    if (source == 0) {
+      NS_LOG_DEBUG("Node " << (*node)->GetId() << " does not export GlobalRouter interface");
+      continue;
+    }
+
+    boost::DistancesMap distances;
+
+    dijkstra_shortest_paths(graph, source,
+                            // predecessor_map (boost::ref(predecessors))
+                            // .
+                            distance_map(boost::ref(distances))
+                              .distance_inf(boost::WeightInf)
+                              .distance_zero(boost::WeightZero)
+                              .distance_compare(boost::WeightCompare())
+                              .distance_combine(boost::WeightCombine()));
+
+    // NS_LOG_DEBUG (predecessors.size () << ", " << distances.size ());
+
+    Ptr<L3Protocol> L3protocol = (*node)->GetObject<L3Protocol>();
+    shared_ptr<nfd::Forwarder> forwarder = L3protocol->getForwarder();
+
+    NS_LOG_DEBUG("Reachability from Node: " << source->GetObject<Node>()->GetId());
+    for (const auto& dist : distances) {
+      if (dist.first == source)
+        continue;
+      else {
+        // cout << "  Node " << dist.first->GetObject<Node> ()->GetId ();
+        if (std::get<0>(dist.second) == 0) {
+          // cout << " is unreachable" << endl;
+        }
+        else {
+          for (const auto& prefix : dist.first->GetLocalPrefixes()) {
+            NS_LOG_DEBUG(" prefix " << prefix << " reachable via face " << *std::get<0>(dist.second)
+                         << " with distance " << std::get<1>(dist.second) << " with delay "
+                         << std::get<2>(dist.second));
+
+            FibHelper::AddRoute(*node, *prefix, std::get<0>(dist.second),
+                                std::get<1>(dist.second));
+          }
+        }
+      }
+    }
+  }
+*/
+
+
+
+
+
+
 
   std::set<std::pair<Face*, EndpointId>> satisfiedDownstreams;
   std::multimap<std::pair<Face*, EndpointId>, std::shared_ptr<pit::Entry>> unsatisfiedPitEntries;
