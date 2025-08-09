@@ -453,7 +453,7 @@ Forwarder::sendCsUpdateInterest(const Data& data)
     for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it) {
       Face* localFace = &*it;
       if (localFace->getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL) {
-        NFD_LOG_DEBUG("cabeee csUpdate, generating interest " << interestCsUpdate << ", for local face " << localFace << std::endl);
+        NFD_LOG_DEBUG("cabeee csUpdate, generating interest " << interestCsUpdate->getName() << ", for local face " << localFace->getId() << std::endl);
         //NFD_LOG_INFO("cabeee csUpdate, generating interest " << interestCsUpdate << ", for local face " << localFace << std::endl);
         localFace->sendInterest(*interestCsUpdate);
       }
