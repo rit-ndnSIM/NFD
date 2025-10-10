@@ -93,6 +93,8 @@ Forwarder::Forwarder(FaceTable& faceTable)
   });
 
   m_strategyChoice.setDefaultStrategy(getDefaultStrategyName());
+
+  m_SDservTracker.clear();
 }
 
 Forwarder::~Forwarder() = default;
@@ -217,8 +219,8 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
   afterCsMiss(interest);
 
   ndn::Name simpleName;
-  simpleName = (interest.getName()).getPrefix(1); // get just the first component of the name, and convert to Uri string
-  std::string simpleStringName = simpleName.toUri();
+  simpleName = (interest.getName()).getPrefix(1); // get just the first component of the name
+  std::string simpleStringName = simpleName.toUri(); // and covert to Uri string
 
 
   // attach HopLimit if configured and not present in Interest
@@ -237,28 +239,183 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
   auto lastExpiryFromNow = lastExpiring->getExpiry() - time::steady_clock::now();
   this->setExpiryTimer(pitEntry, time::duration_cast<time::milliseconds>(lastExpiryFromNow));
 
-  // has NextHopFaceId?
-  auto nextHopTag = interest.getTag<lp::NextHopFaceIdTag>();
-  if (nextHopTag != nullptr) {
-    // chosen NextHop face exists?
-    Face* nextHopFace = m_faceTable.get(*nextHopTag);
-    if (nextHopFace != nullptr) {
-      NFD_LOG_DEBUG("onContentStoreMiss interest=" << interest.getName()
-                    << " nexthop-faceid=" << nextHopFace->getId());
-      // go to outgoing Interest pipeline
-      // scope control is unnecessary, because privileged app explicitly wants to forward
-      this->onOutgoingInterest(interest, *nextHopFace, pitEntry);
-      if (simpleStringName == "/nescoSCOPT" && ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
-        this->sendShortcutOPTinterests(interest, ingress, pitEntry);
+
+  if (interest.getName().getPrefix(-1).getSubName(1,1).toUri() == "/serviceDiscovery") // remove last comopnent (app parameter), then starting at component 1, get 1 component (where /serviceDiscovery would be)
+  {
+    // Determine which interfaces can be used to reach the named service, and generate a new interest for the name service out of each of the faces (even local ones for teh APP).
+    // keep track of which ones have left, so that when data packets arrive, I can evaluate their EFTs. Once all have returned, generate data packet with lowest EFT.
+    ndn::Name simpleName;
+    simpleName = (interest.getName()).getPrefix(-1); // remove the last component of the name (the parameter digest) so we have just the raw name
+    simpleName = simpleName.getSubName(2,1); // remove the zeroeth component of the name (/nesco), and the first component of the name (/serviceDiscovery). starting at component 2, keep 1 component
+    std::string rxedInterestName = simpleName.toUri();
+    //NFD_LOG_DEBUG("NFD ServiceDiscovery rxedInterestName -> simpleName: " << rxedInterestName << '\n');
+    NFD_LOG_DEBUG("NFD ServiceDiscovery received an interest on face " << ingress.face.getId() << " that needs to be distributed to other faces.\n");
+
+
+
+    //look at FIB, and see if this service is reachable out of any other faces. If so, send interest out through each face.
+    for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+    {
+      /*
+      NFD_LOG_DEBUG("\nCABEEEserviceDiscovery, looking at new fib entry");
+      ndn::Name entryName;
+      entryName = fib_iterator->getPrefix();
+      //entryName = entryName.getSubName(1,1); // starting at component 1, get 1 component (/serviceDiscovery only)
+      std::string entryString = entryName.toUri();
+      NFD_LOG_DEBUG("CABEEEserviceDiscovery, fib entryString: " << entryString << " can be reached on following faceIDs: ");
+      const fib::NextHopList& hopList = fib_iterator->getNextHops();
+      for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+          NFD_LOG_DEBUG("faceID: " << hop_iterator->getFace().getId() << ", ");
+      */
+
+
+      ndn::Name name1;
+      name1 = fib_iterator->getPrefix();
+      name1 = name1.getSubName(1,1); // starting at component 1, get 1 component (/serviceDiscovery only)
+      std::string name1String = name1.toUri();
+      //NFD_LOG_DEBUG("CABEEEserviceDiscovery, fib name1String component 1 is " << name1String);
+
+      auto dagParameterFromInterest = interest.getApplicationParameters();
+      std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
+      json dagObject = json::parse(dagString);
+      ndn::Name name2;
+      name2 = fib_iterator->getPrefix();
+      name2 = name2.getSubName(2,1); // starting at component 2, get 1 component (name2 name only)
+      std::string name2String = name2.toUri();
+      //NFD_LOG_DEBUG("CABEEEserviceDiscovery, fib name2String component 2 is "<< name2String << '\n');
+
+      //NFD_LOG_DEBUG("CABEEEserviceDiscovery, interest head is "<< dagObject["head"]);
+      // only generate new serviceDiscovery interest if the incoming interest is for /serviceDiscovery, and this fib entry is for the service the interest is for
+      if (name1String == "/serviceDiscovery" && name2String == dagObject["head"])
+      {
+        //NFD_LOG_DEBUG("CABEEEserviceDiscovery, fib entry has matching /serviceDiscovery/serviceX name\n");
+        if (fib_iterator->hasNextHops())
+        {
+          //NFD_LOG_DEBUG("CABEEEserviceDiscovery, fib_iterator has nextHops, iterating to all faces...\n");
+          // figure out the faceID of all the nexthops in the list, ?and send interest to ones that are NOT local?
+          //fib::NextHopList hopList = fib_iterator->getNextHops();
+          const fib::NextHopList& hopList = fib_iterator->getNextHops();
+          //for (auto &hop_iterator : hopList)
+          for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+          //for (nfd::fib::NextHopList::const_iterator hop_iterator = fib_iterator->getNextHops().begin(); hop_iterator != fib_iterator->getNextHops().end(); ++hop_iterator)
+          {
+            //NFD_LOG_DEBUG("CABEEEserviceDiscovery, looking at all hops for this fib entry\n");
+            //Face thisFace = hop_iterator->getFace();
+            //if (thisFace.getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL)
+            //{
+              //thisFace.sendInterest(interestOPT);
+            //}
+            if (hop_iterator->getFace().getId() != ingress.face.getId()) // do not send new interest out of the incoming face (avoid loops).
+            {
+              // keep track of which interests have left with a JSON data structure
+              // name, faceid, interest generated, data received, delay & EFT out of that faceid.
+/*
+SDservTracker = {
+  "service1": {
+      "faceID1": {
+          "intTx": 0,
+          "dataRx": 0,
+          "linkDelay": -1,
+          "EFT": -1
+      }
+      "faceID2": {
+          "intTx": 0,
+          "dataRx": 0,
+          "linkDelay": -1,
+          "EFT": -1
+      }
+  }
+}
+*/
+/*
+SDservTracker = {
+  "service1 (or use full pDAG name?)": {
+      "faceIN": faceID123, -> but this could be a list of faces, as we just saw! The interests could come from more than one place! We need to eventually generate data packets to all recorded input (downstream) faces!
+      "faceOUT": {
+          "faceID1": {
+              "intTx": 0,
+              "dataRx": 0,
+              "linkDelay": -1,
+              "EFT": -1
+          }
+          "faceID2": {
+              "intTx": 0,
+              "dataRx": 0,
+              "linkDelay": -1,
+              "EFT": -1
+          }
+      }
+  }
+}
+*/
+              // if name entry doesn't exist, create it
+              if (!m_SDservTracker.contains(name2String))
+              {
+                m_SDservTracker[name2String]["faceIN"] = ingress.face.getId();
+                m_SDservTracker[name2String]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = 0;
+                m_SDservTracker[name2String]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["dataRx"] = 0;
+                m_SDservTracker[name2String]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["linkDelay"] = -1;
+                m_SDservTracker[name2String]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["EFT"] = -1;
+              }
+              // if faceID in this name entry doesn't exist, create it (mark interest generated as False and data received as False, delay as -1, EFT as -1).
+              if (!m_SDservTracker[name2String]["faceOUT"].contains(std::to_string(hop_iterator->getFace().getId())))
+              {
+                m_SDservTracker[name2String]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = 0;
+                m_SDservTracker[name2String]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["dataRx"] = 0;
+                m_SDservTracker[name2String]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["linkDelay"] = -1;
+                m_SDservTracker[name2String]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["EFT"] = -1;
+              }
+              if (m_SDservTracker[name2String]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] != 0)
+              {
+                // if faceID exists, and interest is marked as generated, report an error (should never happen? I'm seeing cases where this DOES happen, and it seems to be expected).
+                // for example, when N1/S3 is requestion S1, and we already had received interests for S1 from N2/S3.
+                // Just let it add the PIT entry and drop the new interest.
+                NFD_LOG_DEBUG("CABEEEserviceDiscovery, ERROR??? Maybe not. We are trying to send out this interest through this face again: " << name2String << ", for face with faceID: " << hop_iterator->getFace().getId());
+              }
+              else
+              {
+                NFD_LOG_DEBUG("CABEEEserviceDiscovery, generating interest " << interest.getName().toUri() << ", for face with faceID: " << hop_iterator->getFace().getId());
+                hop_iterator->getFace().sendInterest(interest);
+                // mark this interest as generated.
+                m_SDservTracker[name2String]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = 1;
+              }
+            }
+          }
+        }
+        //else
+          //NFD_LOG_DEBUG("CABEEEserviceDiscovery, fib_iterator does not have nextHops\n");
+      }
     }
     return;
   }
 
-  // dispatch to strategy: after receive Interest
-  m_strategyChoice.findEffectiveStrategy(*pitEntry)
-    .afterReceiveInterest(interest, FaceEndpoint(ingress.face, 0), pitEntry);
-  if (simpleStringName == "/nescoSCOPT" && ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
-    this->sendShortcutOPTinterests(interest, ingress, pitEntry);
+
+  else // regular interest processing
+  {
+    // has NextHopFaceId?
+    auto nextHopTag = interest.getTag<lp::NextHopFaceIdTag>();
+    if (nextHopTag != nullptr) {
+      // chosen NextHop face exists?
+      Face* nextHopFace = m_faceTable.get(*nextHopTag);
+      if (nextHopFace != nullptr) {
+        NFD_LOG_DEBUG("onContentStoreMiss interest=" << interest.getName()
+                      << " nexthop-faceid=" << nextHopFace->getId());
+        // go to outgoing Interest pipeline
+        // scope control is unnecessary, because privileged app explicitly wants to forward
+        this->onOutgoingInterest(interest, *nextHopFace, pitEntry);
+        if (simpleStringName == "/nescoSCOPT" && ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+          this->sendShortcutOPTinterests(interest, ingress, pitEntry);
+      }
+      return;
+    }
+
+    // dispatch to strategy: after receive Interest
+    m_strategyChoice.findEffectiveStrategy(*pitEntry)
+      .afterReceiveInterest(interest, FaceEndpoint(ingress.face, 0), pitEntry);
+    if (simpleStringName == "/nescoSCOPT" && ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+      this->sendShortcutOPTinterests(interest, ingress, pitEntry);
+  }
+
 }
 
 void
@@ -547,16 +704,26 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     return;
   }
 
-  // CS insert
-  m_cs.insert(data);
 
-  if (data.getName().getPrefix(1).toUri() == "/nesco")
+  // don't cache SD data packets
+  if (data.getName().getPrefix(-1).getSubName(1,1).toUri() != "/serviceDiscovery") // remove last comopnent (app parameter), then starting at component 1, get 1 component (where /serviceDiscovery would be)
   {
-    if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL) { // only if data is coming from non-local face. (if coming from local, it's from a service, and thus there is no need to advertise)
-      this->sendCsUpdateInterest(data);
+    NFD_LOG_DEBUG("Attempting to insert into content store, data=" << data.getName() << "\n");
+    // CS insert
+    m_cs.insert(data);
+/*
+    if (data.getName().getPrefix(1).toUri() == "/nesco")
+    {
+      if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL) { // only if data is coming from non-local face. (if coming from local, it's from a service, and thus there is no need to advertise)
+        this->sendCsUpdateInterest(data);
+      }
     }
+*/
   }
-
+  else
+  {
+    NFD_LOG_DEBUG("Skipping content store. Service Discovery data packets should not be cached! data=" << data.getName() << "\n");
+  }
 
 /*
   // register prefix for this new CS content
@@ -685,15 +852,108 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     }
   }
 
-  // foreach pending downstream
-  for (const auto& downstream : satisfiedDownstreams) {
-    if (downstream.first->getId() == ingress.face.getId() &&
-        downstream.second == ingress.endpoint &&
-        downstream.first->getLinkType() != ndn::nfd::LINK_TYPE_AD_HOC) {
-      continue;
+
+/*
+SDservTracker = {
+  "service1 (or use full pDAG name?)": {
+      "faceIN": faceID123,
+      "faceOUT": {
+          "faceID1": {
+              "intTx": 0,
+              "dataRx": 0,
+              "linkDelay": -1,
+              "EFT": -1
+          }
+          "faceID2": {
+              "intTx": 0,
+              "dataRx": 0,
+              "linkDelay": -1,
+              "EFT": -1
+          }
+      }
+  }
+}
+*/
+
+
+
+  // TODO: I think this is where we want to keep track of data packets returning.
+
+  ndn::Name name1;
+  name1 = (data.getName()).getPrefix(-1); // remove the last component of the name (the parameter digest) so we have just the raw name
+  name1 = name1.getSubName(1,1); // remove the zeroeth component of the name (/nesco), starting at component 1, keep 1 component
+  std::string name1String = name1.toUri();
+
+  ndn::Name name2;
+  name2 = (data.getName()).getPrefix(-1); // remove the last component of the name (the parameter digest) so we have just the raw name
+  name2 = name2.getSubName(2,1); // remove the zeroeth and first component of the name (/nesco/serviceDiscovery), starting at component 2, keep 1 component
+  std::string name2String = name2.toUri();
+
+  if (name1 == "/serviceDiscovery") // remove last comopnent (app parameter), then starting at component 1, get 1 component (where /serviceDiscovery would be)
+  {
+    // Upon receiving an SD data packet through a particular face, 
+    // mark it as received through this face.
+    if (m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] != 0)
+      NFD_LOG_DEBUG("CABEEEserviceDiscovery, ERROR??? Should this happen? We received a data packet through this face again: " << name2String << ", for face with faceID: " << ingress.face.getId());
+    m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] = 1;
+    // TODO: Then the node NFD will need to calculate the new EFT for that face.
+      //It will use the data RX time to calculate the link delay upstream, and add that to the EFT for that face.
+    m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["linkDelay"] = -1;
+    m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["EFT"] = -1;
+
+    int allRxed = 1;
+    for (auto& faceIterator : m_SDservTracker[name2String]["faceOUT"].items())
+    {
+      if (m_SDservTracker[name2String]["faceOUT"][faceIterator.key()]["dataRx"] != 1)
+      {
+        allRxed = 0;
+      }
+    }
+    // Only when ALL interests have been satisfied (out of all the faces where we sent them out), will we generate the data packet(s) downstream with the overall lowest EFT.
+    if (allRxed == 1)
+    {
+      NFD_LOG_DEBUG("CABEEEserviceDiscovery, all data packets for " << name2String << " have been received on all faces!!! Generating data packet downstream");
+      // The new data packet going back downstream will contain: 
+      // "Pruned DAG (pDAG) Service name" that it is being hosted and requested (serviceS/PWFH).
+      // Calculate EFT (earliest finish time) and include it (lowest EFT of all the faces).
+      // Timestamp of when data packet leaves (to measure delay to downstream nodes).
+
+      // TODO: The node will then record the lowest EFT cost in the FIB by creating a new table entry using the pDAG name.
+        // The cost will be EFT in micro-seconds? This EFT is units of time after the initial interest is generated.
+
+       
+      Face* downFace = m_faceTable.get(m_SDservTracker[name2String]["faceIN"]);
+      NFD_LOG_DEBUG("CABEEEserviceDiscovery, data packet for " << name2String << " is being sent downstream through face " << m_SDservTracker[name2String]["faceIN"]);
+      // IF above doesn't work, then try this:
+/*
+      Face* downFace;
+      for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it) {
+        downFace = &*it;
+        if (downFace.getId() == m_SDservTracker[name2String]["faceIN"])
+          break;
+        }
+      }
+*/
+
+
+      this->onOutgoingData(data, *downFace);
+
     }
 
-    this->onOutgoingData(data, *downstream.first);
+  }
+  else // regular data packet processing
+  {
+
+    // foreach pending downstream
+    for (const auto& downstream : satisfiedDownstreams) {
+      if (downstream.first->getId() == ingress.face.getId() &&
+          downstream.second == ingress.endpoint &&
+          downstream.first->getLinkType() != ndn::nfd::LINK_TYPE_AD_HOC) {
+        continue;
+      }
+
+      this->onOutgoingData(data, *downstream.first);
+    }
   }
 }
 

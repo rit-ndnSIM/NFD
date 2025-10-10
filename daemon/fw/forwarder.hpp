@@ -39,6 +39,9 @@
 #include "table/dead-nonce-list.hpp"
 #include "table/network-region-table.hpp"
 
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
+
 namespace nfd {
 
 namespace fw {
@@ -276,6 +279,7 @@ private:
   DeadNonceList      m_deadNonceList;
   NetworkRegionTable m_networkRegionTable;
   shared_ptr<Face>   m_csFace;
+  json m_SDservTracker; // with this data structure, we can keep track of WHICH SD data packets have arrived.
 
   // allow Strategy (base class) to enter pipelines
   friend class fw::Strategy;
