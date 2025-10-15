@@ -41,6 +41,8 @@
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
 
+#include "ns3/simulator.h"
+
 
 namespace nfd {
 
@@ -386,6 +388,7 @@ SDservTracker = {
           //NFD_LOG_DEBUG("CABEEEserviceDiscovery, fib_iterator does not have nextHops\n");
       }
     }
+    NS_LOG_DEBUG("\n\nNFD forwarder service discovery - m_SDservTracker data structure: " << std::setw(2) << m_SDservTracker << '\n');
     return;
   }
 
@@ -896,23 +899,121 @@ SDservTracker = {
     if (m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] != 0)
       NFD_LOG_DEBUG("CABEEEserviceDiscovery, ERROR??? Should this happen? We received a data packet through this face again: " << name2String << ", for face with faceID: " << ingress.face.getId());
     m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] = 1;
-    // TODO: Then the node NFD will need to calculate the new EFT for that face.
+
+
+    // Then the node NFD will need to calculate the new EFT for that face.
       //It will use the data RX time to calculate the link delay upstream, and add that to the EFT for that face.
-    m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["linkDelay"] = -1;
-    m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["EFT"] = -1;
+
+
+    //unsigned char myBuffer[1024];
+    //pServiceInput = (uint8_t *)(data->getContent().data()); // this points to the first byte, which is the TLV-TYPE (21 for data packet content)
+
+    //memcpy(myBuffer, (uint8_t*)(data->getContent().data()), 1024);
+
+    NS_LOG_DEBUG("Data packet received: " << data);
+    NS_LOG_DEBUG("Data packet contents received: " << data.getContent());
+    NS_LOG_DEBUG("Data packet contents size: " << data.getContent().value_size());
+
+    NS_LOG_DEBUG("Now reading it into string...");
+
+    std::string dataPacketString;
+    //uint8_t *pData = 0;
+    //pData = (uint8_t *)data.getContent().data(); // assume data packet content is ONLY the json string, not 1024 bytes
+    //NS_LOG_DEBUG("Calculating size...");
+    //size_t length = data.getContent().value_size();
+    //NS_LOG_DEBUG("Doing memcpy");
+    //memcpy(dataPacketString, pData, length);
+    dataPacketString = (const char *)data.getContent().value();
+
+/*
+    const ndn::Block& contentBlock = data.getContent();
+    const uint8_t* rawData = contentBlock.value();
+    size_t dataSize = contentBlock.value_size();
+
+    // Now 'rawData' points to the content and 'dataSize' is its length
+    unsigned char myBuffer[1024];
+    for (size_t i = 0; i < dataSize; ++i) {
+        myBuffer[i] = static_cast<char>(rawData[i]);
+    }
+ */
+
+    NS_LOG_DEBUG("Data string received: " << dataPacketString);
+
+
+    NS_LOG_DEBUG("Now parsing it into JSON...");
+
+    json dataPacketContents = json::parse(dataPacketString);
+
+    NS_LOG_DEBUG("Data received - EFT: " << dataPacketContents["EFT"] << ", txTime: " << dataPacketContents["txTime"]);
+
+
+    //std::string dataTxTimeString = dataPacketContents["txTime"];  // if data comes as string
+    //uint64_t dataTxTime = std::stoi(dataTxTimeString);            // if data comes as string
+    uint64_t dataTxTime = dataPacketContents["txTime"];             // if data comes as number
+
+    ns3::Time timeNow;
+    timeNow = ns3::Simulator::Now();
+    ns3::Time timeTx;
+    timeTx = ns3::Time::FromInteger(dataTxTime, ns3::Time::MS);
+    ns3::Time linkDelay;
+    linkDelay = timeNow - timeTx;
+    NS_LOG_DEBUG("Calculated link delay is: time.now " << timeNow.ToInteger(ns3::Time::MS) << " - timeTx " << timeTx.ToInteger(ns3::Time::MS) << " = " << linkDelay.ToInteger(ns3::Time::MS) << "ms");
+
+
+    //std::string dataEFTString = dataPacketContents["EFT"];      // if data comes as string
+    //uint64_t dataEFT = std::stoi(dataEFTString);                // if data comes as string
+    uint64_t dataEFT = dataPacketContents["EFT"];                 // if data comes as number
+
+    ns3::Time eft;
+    eft = ns3::Time::FromInteger(dataEFT, ns3::Time::MS);
+    ns3::Time newEFT;
+    newEFT = eft + linkDelay;
+    NS_LOG_DEBUG("Calculated EFT out of this face is: EFT " << eft.ToInteger(ns3::Time::MS) << " + upstreamLinkDelay " << linkDelay.ToInteger(ns3::Time::MS) << " = " << newEFT.ToInteger(ns3::Time::MS) << "ms");
+
+
+
+
+    // Convert Time to integer in milliseconds and then to string
+    int64_t linkDelayMS = linkDelay.ToInteger(ns3::Time::MS);
+    std::string linkDelayStringMS = std::to_string(linkDelayMS);
+    int64_t eftMS = newEFT.ToInteger(ns3::Time::MS);
+    std::string eftStringMS = std::to_string(eftMS);
+
+    //m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["linkDelay"] = linkDelayStringMS;   // if stored as string
+    //m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["EFT"] = eftStringMS;               // if stored as string
+    m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["linkDelay"] = linkDelayMS;           // if stored as number
+    m_SDservTracker[name2String]["faceOUT"][std::to_string(ingress.face.getId())]["EFT"] = eftMS;                       // if stored as number
+
+
+
+
+
+
 
     int allRxed = 1;
+    uint64_t lowestEFT = -1;  // initialize to invalid EFT
     for (auto& faceIterator : m_SDservTracker[name2String]["faceOUT"].items())
     {
       if (m_SDservTracker[name2String]["faceOUT"][faceIterator.key()]["dataRx"] != 1)
       {
         allRxed = 0;
       }
+
+      // figure out which is the lowest EFT of all the upstream faces that we've received packets for so far
+      uint64_t thisEFT = m_SDservTracker[name2String]["faceOUT"][faceIterator.key()]["EFT"];
+      if (lowestEFT == -1)
+      {
+        lowestEFT = thisEFT; // initialize to the first one
+      }
+      if (thisEFT != -1 && thisEFT < lowestEFT)
+      {
+        lowestEFT = thisEFT; // this becomes the lowest EFT found so far
+      }
     }
     // Only when ALL interests have been satisfied (out of all the faces where we sent them out), will we generate the data packet(s) downstream with the overall lowest EFT.
     if (allRxed == 1)
     {
-      NFD_LOG_DEBUG("CABEEEserviceDiscovery, all data packets for " << name2String << " have been received on all faces!!! Generating data packet downstream");
+      NFD_LOG_DEBUG("CABEEEserviceDiscovery, all data packets for " << name2String << " have been received on all faces!!! Calculating best EFT and generating data packet downstream");
       // The new data packet going back downstream will contain: 
       // "Pruned DAG (pDAG) Service name" that it is being hosted and requested (serviceS/PWFH).
       // Calculate EFT (earliest finish time) and include it (lowest EFT of all the faces).
@@ -936,7 +1037,44 @@ SDservTracker = {
 */
 
 
-      this->onOutgoingData(data, *downFace);
+      auto new_data = std::make_shared<ndn::Data>(data.getName());
+      new_data->setFreshnessPeriod(data.getFreshnessPeriod());
+
+      unsigned char myBuffer[1024];
+      json dataPacketContents;
+      ns3::Time timeNow;
+      timeNow = ns3::Simulator::Now();
+      // Convert to integer in milliseconds and then to string
+      int64_t timeNowMS = timeNow.ToInteger(ns3::Time::MS);
+      std::string timeStringMS = std::to_string(timeNowMS);
+      //dataPacketContents["txTime"] = timeStringMS;                // if we send it as a string
+      dataPacketContents["txTime"] = timeNowMS;                     // if we send it as a number
+      //std::string lowestEFTStringMS = std::to_string(lowestEFT);  // if we send it as a string
+      //dataPacketContents["EFT"] = lowestEFTStringMS;              // if we send it as a string
+      dataPacketContents["EFT"] = lowestEFT;                        // if we send it as a number
+
+      std::string dataPacketString = dataPacketContents.dump();
+
+      // instead of just writing a single value to the buffer, now we write the JSON data structure containing EFT and tx timestamp
+      // write to the buffer, after making sure it's big enough
+      if (strlen(dataPacketString.c_str())+1 > 1024) // string length plus NULL terminating character
+      {
+        NS_LOG_DEBUG("NFD SD Forwarding ERROR!! The data packet size is larger than 1024!!!");
+      }
+      else
+      {
+        NS_LOG_DEBUG("The data packet size using strlen+1 is " << strlen(dataPacketString.c_str())+1);
+        NS_LOG_DEBUG("The data packet size using length+1 operator is " << dataPacketString.length()+1);
+      }
+      memcpy(myBuffer, dataPacketString.c_str(), strlen(dataPacketString.c_str())+1);
+      //new_data->setContent(myBuffer, 1024); // make the data always 1024 bytes long
+      new_data->setContent(myBuffer, strlen(dataPacketString.c_str())+1); // make the data just big enough to fit the json object
+
+      //ndn::StackHelper::getKeyChain().sign(*new_data); // TODO: do we need to sign the data packet? How? I've never done this in NFD, only in applications
+      NS_LOG_DEBUG("Sending Data packet for " << new_data->getName());
+
+
+      this->onOutgoingData(*new_data, *downFace);
 
     }
 
