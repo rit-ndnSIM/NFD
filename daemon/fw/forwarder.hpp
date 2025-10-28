@@ -38,6 +38,7 @@
 #include "table/strategy-choice.hpp"
 #include "table/dead-nonce-list.hpp"
 #include "table/network-region-table.hpp"
+#include <ndn-cxx/security/key-chain.hpp>
 
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
@@ -58,6 +59,7 @@ class Forwarder
 public:
   explicit
   Forwarder(FaceTable& faceTable);
+  //Forwarder(FaceTable& faceTable, ndn::KeyChain& keyChain);
 
   NFD_VIRTUAL_WITH_TESTS
   ~Forwarder();
@@ -268,6 +270,7 @@ private:
   ForwarderCounters m_counters;
 
   FaceTable& m_faceTable;
+  //ndn::KeyChain& m_keyChain;
   unique_ptr<fw::UnsolicitedDataPolicy> m_unsolicitedDataPolicy;
 
   NameTree           m_nameTree;
