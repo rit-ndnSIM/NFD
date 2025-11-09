@@ -45,6 +45,7 @@ using json = nlohmann::json;
 #include "ns3/node-list.h"
 #include "ns3/node.h"
 
+#include "ndn-cxx/mgmt/nfd/fib-entry.hpp"
 
 namespace nfd {
 
@@ -361,6 +362,8 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
       //NFD_LOG_DEBUG("NFDServiceDiscovery adding this name to faceIN list: " << jsonName << " - faceID is: " << faceInIdString);
       m_SDservTracker[jsonName]["faceIN"]["inID"] = faceInId;                     // we record the faceID
       m_SDservTracker[jsonName]["faceIN"]["inName"] = interest.getName().toUri(); // we record the original name as it came in, so we know what name to use when we respond with data downstream.
+      m_SDservTracker[jsonName]["faceIN"]["dag"] = dagObject["dag"];              // we capture the pDag here so that we can use it to generate the name we use for the FIB entry  we create later.
+      m_SDservTracker[jsonName]["faceIN"]["head"] = dagObject["head"];            // we capture the "head" here so that we can use it to generate the name&hash we use for the FIB entry  we create later.
     }
 
 
@@ -522,6 +525,47 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
   simpleName = (interest.getName()).getPrefix(1); // get just the first component of the name, and convert to Uri string
   std::string simpleStringName = simpleName.toUri();
   
+
+/*
+  // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
+  if (simpleStringName == "/nesco")
+  {
+    for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+    {
+      //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
+      ndn::Name entryName;
+      entryName = fib_iterator->getPrefix();
+      entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
+      std::string entryString = entryName.toUri();
+
+      auto dagParameterFromInterest = interest.getApplicationParameters();
+      std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
+      json dagObject = json::parse(dagString);
+      ndn::Name serviceName;
+      serviceName = fib_iterator->getPrefix();
+      serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
+      std::string serviceString = serviceName.toUri();
+
+      // only print FIB entries if this interest is for this fib iterator
+      if (entryString == "/nesco" && serviceString == dagObject["head"])
+      {
+        if (fib_iterator->hasNextHops())
+        {
+          // figure out the faceID of all the nexthops in the list, and send interest to ones that are local
+          const fib::NextHopList& hopList = fib_iterator->getNextHops();
+          for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+          {
+            NFD_LOG_DEBUG("CABEEEfibEntries: interest " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
+          }
+        }
+      }
+    }
+  }
+*/
+
+
+
+
 
   // has NextHopFaceId?
   auto nextHopTag = interest.getTag<lp::NextHopFaceIdTag>();
@@ -915,6 +959,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
     int allRxed = 1;
     uint64_t lowestEFT = -1;  // initialize to invalid EFT
+    std::string lowestFace = "";
     for (auto& faceIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
     {
       if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceIterator.key()]["dataRx"] != 1)
@@ -927,10 +972,12 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       if (lowestEFT == -1)
       {
         lowestEFT = thisEFT; // initialize to the first one
+        lowestFace = faceIterator.key(); // initialize to the first one
       }
       if (thisEFT != -1 && thisEFT < lowestEFT)
       {
         lowestEFT = thisEFT; // this becomes the lowest EFT found so far
+        lowestFace = faceIterator.key(); // initialize to the first one
       }
     }
     // Only when ALL interests have been satisfied (out of all the faces where we sent them out), will we generate the data packet(s) downstream with the overall lowest EFT.
@@ -942,8 +989,52 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       // Calculate EFT (earliest finish time) and include it (lowest EFT of all the faces).
       // Timestamp of when data packet leaves (to measure delay to downstream nodes).
 
-      // TODO: The node will then record the lowest EFT cost in the FIB by creating a new table entry using the pDAG name.
-        // The cost will be EFT in nano-seconds? This EFT is units of time after the initial interest is generated.
+      // create the FIB entry, so that when the workflow runs, we route through the face that has the lowest EFT.
+      // The node will record the lowest EFT cost in the FIB by creating a new table entry using the pDAG name.
+      // The cost will be EFT in nano-seconds. This EFT is units of time after the initial interest is generated.
+      auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+      Face* thisFace;
+      for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+      {
+        thisFace = &*it;
+        if (std::to_string(thisFace->getId()) == lowestFace)
+        {
+          break;
+        }
+      }
+
+      // if it is a local face (to an application - to a locally hosted service), we don't create the FIB entry, and instead rely on the 0 cost regular FIB entry from the service itself.
+        // this is because the recorded face with lowest EFT is for the serviceDiscovery service, not the actual workflow service. Each application gets its own local face.
+      // otherwise, if it is a non-local face, we would be going out to another NFD node, and thus we create a new FIB entry with that non-local face.
+      if (thisFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+      {
+        // create name&pDAG just like it will be created by the regular consumer.
+        ndn::Name futureName;
+        futureName = (data.getName()).getPrefix(-1); // remove the last component of the name (the parameter digest) so we have just the raw name
+        futureName = futureName.getSubName(2,1); // remove the zeroeth component of the name (/nesco), and the first component of the name (/serviceDiscovery). starting at component 2, keep 1 component
+        std::string futureNameString = "/nesco" + futureName.toUri();
+
+        json dagObject;
+        dagObject["dag"]  = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["dag"];
+        dagObject["head"] = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["head"];
+        std::string updatedDagString = dagObject.dump();
+        // in order to convert from std::string to a char[] datatype we do the following (https://stackoverflow.com/questions/7352099/stdstring-to-char):
+        char *dagStringParameter = new char[updatedDagString.length() + 1];
+        strcpy(dagStringParameter, updatedDagString.c_str());
+        size_t length = strlen(dagStringParameter);
+
+        shared_ptr<Interest> dummyInterest = make_shared<Interest>();
+        dummyInterest->setName(futureNameString);
+        dummyInterest->setApplicationParameters((const uint8_t *)dagStringParameter, length);
+        futureName = dummyInterest->getName();
+
+        fib::Entry* entry = m_fib.insert(futureName).first;
+        m_fib.addOrUpdateNextHop(*entry, *thisFace, lowestEFT);
+        NFD_LOG_DEBUG("NFDServiceDiscovery, addNextHopRecord for " << futureName.toUri() << " added, with face " << thisFace->getId() << ", and cost " << lowestEFT);
+      }
+
+
+
 
 
       // create data packet, but use stored name/hash!
