@@ -43,6 +43,14 @@
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
 
+
+struct Service {
+    std::string name;
+    int64_t start;
+    int64_t end;
+};
+
+
 namespace nfd {
 
 namespace fw {
@@ -282,7 +290,7 @@ private:
   DeadNonceList      m_deadNonceList;
   NetworkRegionTable m_networkRegionTable;
   shared_ptr<Face>   m_csFace;
-  json m_SDservTracker; // with this data structure, we can keep track of WHICH SD data packets have arrived.
+  json m_SDservTracker; // with this data structure, we can keep track of WHICH SD data packets have arrived, the faces (downstream and upstream), the EFT, upstream link delay, as well as service scheduling.
 
   // allow Strategy (base class) to enter pipelines
   friend class fw::Strategy;
