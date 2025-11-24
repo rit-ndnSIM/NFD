@@ -237,6 +237,61 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
   }
 
 
+
+
+
+  // if we are receiving a schedulerRelease message from a node downstream, then remove the scheduled service from this node if it exists. If it does not exist, forward the release request further upstream.
+  if (interest.getName().getSubName(1,1).toUri() == "/schedulerRelease") // starting at component 1, get 1 component (where /schedulerRelease would be)
+  {
+    // name&hash to remove from CPU scheduling will come as an application parameter, not as part of the actual schedulerRelease name
+    auto appParameterFromInterest = interest.getApplicationParameters();
+    std::string nameAndHashToRemove = std::string(reinterpret_cast<const char*>(appParameterFromInterest.value()), appParameterFromInterest.value_size());
+    NFD_LOG_DEBUG("NFDServiceDiscovery - received schedulerRelease message for " << nameAndHashToRemove << std::endl);
+    for (auto& serviceIterator : m_SDservTracker.items())
+    {
+      //NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease evaluating service " << serviceIterator.key() << " with inName " << m_SDservTracker[serviceIterator.key()]["faceIN"]["inName"] << std::endl);
+      if (m_SDservTracker[serviceIterator.key()]["faceIN"]["inName"] == nameAndHashToRemove)
+      {
+        if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
+        {
+          NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease removing scheduled service " << nameAndHashToRemove << std::endl);
+          m_SDservTracker[serviceIterator.key()]["faceIN"].erase("serviceScheduling");
+        }
+        else
+        {
+          //NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease will send request further upststream using name " << serviceIterator.key() << std::endl);
+          // send the request further upstream
+          // TODO: package the following code into a function - sendInterestUpstreamToUnSchedule(uniqueHistoricalName&pDAG);
+          shared_ptr<Interest> interestSchedulerRelease = make_shared<Interest>();
+          interestSchedulerRelease->setName("/nesco/schedulerRelease");
+          std::string appParamString = "/nesco/serviceDiscovery" + serviceIterator.key();
+          //std::cout << "appParamString: " << appParamString << std::endl;
+          // in order to convert from std::string to a char[] datatype we do the following (https://stackoverflow.com/questions/7352099/stdstring-to-char):
+          char *newAppParamString = new char[appParamString.length() + 1];
+          strcpy(newAppParamString, appParamString.c_str());
+          size_t length = strlen(newAppParamString);
+          interestSchedulerRelease->setApplicationParameters((const uint8_t *)newAppParamString, length);
+
+          for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+          {
+            Face* thisFace = &*it;
+            for (auto& faceIterator : m_SDservTracker[serviceIterator.key()]["faceOUT"].items())
+            {
+              if (std::to_string(thisFace->getId()) == faceIterator.key())
+              {
+                NFD_LOG_DEBUG("NFDServiceDiscovery - sending schedulerRelease message for " << serviceIterator.key() << " upstream through face " << thisFace->getId() << std::endl);
+                thisFace->sendInterest(*interestSchedulerRelease);
+              }
+            }
+          }
+        }
+      }
+    }
+    return;
+  }
+
+
+
   // service discovery interest processing (no PIT entry created)
   if (interest.getName().getPrefix(-1).getSubName(1,1).toUri() == "/serviceDiscovery") // remove last comopnent (app parameter), then starting at component 1, get 1 component (where /serviceDiscovery would be)
   {
@@ -307,6 +362,9 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
       m_SDservTracker[jsonName]["faceIN"]["dag"] = dagObject["dag"];              // we capture the pDag here so that we can use it to generate the name we use for the FIB entry  we create later.
       m_SDservTracker[jsonName]["faceIN"]["head"] = dagObject["head"];            // we capture the "head" here so that we can use it to generate the name&hash we use for the FIB entry  we create later.
     }
+    //if (!m_SDservTracker[jsonName].contains("faceOUT"))
+    //{
+    //}
 
 
 
@@ -381,7 +439,7 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
 
     } // FIB iteration for loop
 
-    //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Interest): " << std::setw(2) << m_SDservTracker << '\n');
+    NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Interest): " << std::setw(2) << m_SDservTracker << '\n');
     return;
   }
 
@@ -1092,7 +1150,12 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
           NFD_LOG_DEBUG("NFDServiceDiscovery scheduling - inserting after last existing service. earliestStartPossible: " << earliestStartPossible << ", earliestEndPossible: " << earliestEndPossible);
         }
 
+
         NFD_LOG_DEBUG("NFDServiceDiscovery re-evaluating lowest EFT after scheduling - earliestEndPossible: " << earliestEndPossible << ", lowestNonLocalEFT: " << lowestNonLocalEFT);
+
+
+
+
 
         // Then re-evaluate if running locally is still the lowest EFT (or if it's our only choice - in which case lowestNonLocalEFT would still be zero).
         if ((earliestEndPossible < lowestNonLocalEFT) || (lowestNonLocalEFT == -1)) // if yes, then schedule it locally
@@ -1105,12 +1168,10 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
           m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] = earliestStartPossible;
           m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] = earliestEndPossible;
           lowestEFT = earliestEndPossible;
-          //lowestFace = lowestFace;
-          // since it has been scheduled locally, send a messages upstream to un-schedule it from any other nodes.
-          // TODO:  for-loop to iterate through all faceOUT entries 
-            // TODO: send to each face: sendInterestUpstreamToUnSchedule(uniqueHistoricalName&pDAG);
+          //lowestFace = lowestFace; // if we are here, lowestFace will be the local face already.
+
         }
-        else // If no, then don't schedule the task and use the other face (lowestNonLocalFace)
+        else // Running locally is no longer the lowest EFT, so don't schedule the task and use the other face (lowestNonLocalFace)
         {
           // update lowestEFT and lowestFace variables to be the non-local one (with lowestNonLocalEFT)
           NFD_LOG_DEBUG("NFDServiceDiscovery - NOT SCHEDULING, RUNNING ELSEWHERE UPSTREAM!!!");
@@ -1118,6 +1179,40 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
           lowestFace = lowestNonLocalFace;
         }
 
+      }
+
+
+      NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after scheduled): " << std::setw(2) << m_SDservTracker << '\n');
+
+
+      // Loop through all faceOUTs (local and non-local), and send schedulerRelease message to each face only if it is a non-local faces AND is not the lowestCostFace
+
+      // TODO: package the following code into a function - sendInterestUpstreamToUnSchedule(uniqueHistoricalName&pDAG);
+      shared_ptr<Interest> interestSchedulerRelease = make_shared<Interest>();
+      interestSchedulerRelease->setName("/nesco/schedulerRelease");
+      std::string appParamString = "/nesco/serviceDiscovery" + rxedDataNameAndHash;
+      //std::cout << "appParamString: " << appParamString << std::endl;
+      // in order to convert from std::string to a char[] datatype we do the following (https://stackoverflow.com/questions/7352099/stdstring-to-char):
+      char *newAppParamString = new char[appParamString.length() + 1];
+      strcpy(newAppParamString, appParamString.c_str());
+      size_t length = strlen(newAppParamString);
+      interestSchedulerRelease->setApplicationParameters((const uint8_t *)newAppParamString, length);
+
+
+      for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+      {
+        Face* thisFace = &*it;
+        for (auto& faceIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
+        {
+          if (std::to_string(thisFace->getId()) == faceIterator.key())
+          {
+            if ((faceIterator.key() != lowestFace) && (thisFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL))
+            {
+              NFD_LOG_DEBUG("NFDServiceDiscovery - sending schedulerRelease message for " << rxedDataNameAndHash << " upstream through face " << thisFace->getId() << std::endl);
+              thisFace->sendInterest(*interestSchedulerRelease);
+            }
+          }
+        }
       }
 
 
@@ -1153,11 +1248,11 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       // in order to convert from std::string to a char[] datatype we do the following (https://stackoverflow.com/questions/7352099/stdstring-to-char):
       char *dagStringParameter = new char[updatedDagString.length() + 1];
       strcpy(dagStringParameter, updatedDagString.c_str());
-      size_t length = strlen(dagStringParameter);
+      size_t lengthParam = strlen(dagStringParameter);
 
       shared_ptr<Interest> dummyInterest = make_shared<Interest>();
       dummyInterest->setName(futureNameString);
-      dummyInterest->setApplicationParameters((const uint8_t *)dagStringParameter, length);
+      dummyInterest->setApplicationParameters((const uint8_t *)dagStringParameter, lengthParam);
       futureName = dummyInterest->getName();
 
       // if it is a local face (to an application - to a locally hosted service), we don't create the FIB entry, and instead rely on the 0 cost regular FIB entry from the service itself.
@@ -1231,14 +1326,23 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       this->onOutgoingData(*new_data, *downFace);
 
 
-      // clear m_SDservTracker entry FOR THIS SERVICE ONLY, so that if a new interest is received, we go looking for inputs again
+      // clear m_SDservTracker faceOUT entry FOR THIS SERVICE ONLY, so that if a new interest is received, we go looking for inputs again
       //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - removing m_SDservTracker entry for " << rxedDataNameAndHash << '\n');
-      m_SDservTracker.erase(rxedDataNameAndHash);
-      //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after sending downstream): " << std::setw(2) << m_SDservTracker << '\n');
+      //m_SDservTracker.erase(rxedDataNameAndHash); // erase the entire entry
+      //m_SDservTracker[rxedDataNameAndHash].erase("faceOUT"); // only erase the "faceOUT" portion, otherwise we would be removing the CPU scheduling information!
+      // we can't just erase the faceOUT portion, because I'm trying to use it for dissiminating schedulerRelease messages too! So instead we just reset all the values.
+      for (auto& faceIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
+      {
+        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceIterator.key()]["intTx"] = 0;
+        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceIterator.key()]["dataRx"] = 0;
+        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceIterator.key()]["linkDelay"] = -1;
+        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceIterator.key()]["EFT"] = -1;
+      }
+      NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after sending downstream): " << std::setw(2) << m_SDservTracker << '\n');
 
-    }
+    } // end if (allRxed)
 
-  }
+  } // end if (name1String == "/serviceDiscovery")
 
 
   else // regular data packet processing
