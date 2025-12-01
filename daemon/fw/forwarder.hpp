@@ -63,6 +63,7 @@ class Strategy;
  * The Forwarder class owns all tables and implements the forwarding pipelines.
  */
 class Forwarder
+//class Forwarder : public std::enable_shared_from_this<Forwarder>
 {
 public:
   explicit
@@ -144,6 +145,13 @@ public:
   void
   setConfigFile(ConfigFile& configFile);
 
+  void
+  allocateResource(const std::string& serviceName, const Data& data, const FaceEndpoint& ingress);
+
+  void
+  freeResource(const std::string& serviceName, const Data& data, const FaceEndpoint& ingress);
+
+
 public:
   /** \brief trigger before PIT entry is satisfied
    *  \sa Strategy::beforeSatisfyInterest
@@ -207,6 +215,9 @@ NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE: // pipelines
   NFD_VIRTUAL_WITH_TESTS void
   onIncomingData(const Data& data, const FaceEndpoint& ingress);
 
+  NFD_VIRTUAL_WITH_TESTS void
+  onIncomingDataAfterServiceRuns(const Data& data, const FaceEndpoint& ingress);
+
   /** \brief Data unsolicited pipeline
    */
   NFD_VIRTUAL_WITH_TESTS void
@@ -238,6 +249,7 @@ NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE: // pipelines
   NFD_VIRTUAL_WITH_TESTS void
   onNewNextHop(const Name& prefix, const fib::NextHop& nextHop);
 
+
 private:
   /** \brief set a new expiry timer (now + \p duration) on a PIT entry
    */
@@ -261,6 +273,9 @@ private:
   void
   processConfig(const ConfigSection& configSection, bool isDryRun,
                 const std::string& filename);
+
+  void
+  sendSchedulerReleaseInterestUpstream(const std::string nameAndHash, const std::string lowestFace);
 
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
   /**
@@ -291,6 +306,7 @@ private:
   NetworkRegionTable m_networkRegionTable;
   shared_ptr<Face>   m_csFace;
   json m_SDservTracker; // with this data structure, we can keep track of WHICH SD data packets have arrived, the faces (downstream and upstream), the EFT, upstream link delay, as well as service scheduling.
+  bool m_resourceBusy;
 
   // allow Strategy (base class) to enter pipelines
   friend class fw::Strategy;
