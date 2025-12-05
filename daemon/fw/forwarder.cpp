@@ -189,13 +189,28 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
   // this effectively counts the number of interest packets that are generated at the consumer (including the custom forwarders)
   if (simpleStringName == "/nesco" || simpleStringName == "/nescoSCOPT" || simpleStringName == "/orchA" || simpleStringName == "/orchB")
   {
-    if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+    if (interest.getName().getPrefix(-1).getSubName(1,1).toUri() == "/serviceDiscovery" ||
+        interest.getName().getPrefix(-1).getSubName(1,1).toUri() == "/schedulerRelease")
     {
-      NFD_LOG_INFO("     CABEEE: onIncomingInterestFromApp (from consuming application only) =" << " name=" << interest.getName());
+      if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+      {
+        NFD_LOG_INFO("     CABEEE: onIncomingSDInterestFromApp (from consuming application only) =" << " name=" << interest.getName());
+      }
+      else
+      {
+        NFD_LOG_INFO("     CABEEE: onIncomingSDInterestFromFace (from another NFD node on a physical face) =" << " name=" << interest.getName());
+      }
     }
     else
     {
-      NFD_LOG_INFO("     CABEEE: onIncomingInterestFromFace (from another NFD node on a physical face) =" << " name=" << interest.getName());
+      if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+      {
+        NFD_LOG_INFO("     CABEEE: onIncomingWFInterestFromApp (from consuming application only) =" << " name=" << interest.getName());
+      }
+      else
+      {
+        NFD_LOG_INFO("     CABEEE: onIncomingWFInterestFromFace (from another NFD node on a physical face) =" << " name=" << interest.getName());
+      }
     }
   }
 
@@ -873,7 +888,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     // Upon receiving an SD data packet through a particular face, 
     // mark it as received through this face.
     if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] != 0)
-      NFD_LOG_DEBUG("NFDServiceDiscovery, ERROR??? Should this happen? We received a data packet through this face again: " << rxedDataNameAndHash << ", for face with faceID: " << ingress.face.getId());
+      NFD_LOG_WARN("NFDServiceDiscovery, ERROR??? Should this happen? We received a data packet through this face again: " << rxedDataNameAndHash << ", for face with faceID: " << ingress.face.getId());
     m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] = 1;
 
 
@@ -1130,7 +1145,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
           {
             if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
             {
-              NFD_LOG_DEBUG("NFD SD Forwarding ERROR!! This service has already been scheduled!!!!");
+              NFD_LOG_ERROR("NFD SD Forwarding ERROR!! This service has already been scheduled!!!!");
             }
             NFD_LOG_DEBUG("NFDServiceDiscovery - SCHEDULING TO RUN LOCALLY!!!");
             m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] = earliestStartPossible;
@@ -1246,7 +1261,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       // write to the buffer, after making sure it's big enough
       if (strlen(dataPacketString.c_str())+1 > 1024) // string length plus NULL terminating character
       {
-        NFD_LOG_DEBUG("NFD SD Forwarding ERROR!! The data packet size is larger than 1024!!!");
+        NFD_LOG_ERROR("NFD SD Forwarding ERROR!! The data packet size is larger than 1024!!!");
       }
       //else
       //{
@@ -1712,11 +1727,14 @@ Forwarder::allocateResource(const std::string& serviceName, const Data& data, co
 
   // Acquire resource
   m_resourceBusy = true;
-  NFD_LOG_DEBUG("NFDServiceDiscovery - resourceAllocation: Service " << serviceName << " started running. Setting resourceBusy = true (resource locked).");
+  ns3::Time timeNow = ns3::Simulator::Now();
+  int64_t timeNowUS = timeNow.ToInteger(ns3::Time::US); // Convert to integer
+  auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+  NFD_LOG_INFO("NFDServiceDiscovery - resourceAllocation: Service " << serviceName << " started running on node " << (*node).GetId() << ". Setting resourceBusy = true (resource locked at " << timeNowUS << " microseconds).");
 
   // Schedule release
   //ns3::Simulator::Schedule(ns3::MilliSeconds(1), &Forwarder::freeResource, this, serviceName, data, ingress);
-  ns3::Simulator::Schedule(ns3::MilliSeconds(1), &Forwarder::freeResource, this, serviceName, *dataPtr, *ingressPtr);
+  ns3::Simulator::Schedule(ns3::MilliSeconds(1), &Forwarder::freeResource, this, serviceName, *dataPtr, *ingressPtr); // TODO: this assumes all services take 1ms. Need to get the real service latency from somewhere.
 }
 
 
@@ -1728,12 +1746,10 @@ Forwarder::freeResource(const std::string& serviceName, const Data& data, const 
   auto ingressPtr = std::make_shared<FaceEndpoint>(ingress);
 
   m_resourceBusy = false;
-  //TODO: also remove the "serviceScheduling" entry in m_SDservTracker[serviceNameAndHash]["faceIN"] so that we mark that time as a free gap.
-  // BUT, this start/end timing for allocation is based on the SD interest, and not based on the real workflow start time. So it doesn't "line up"
-  // with any other potential workflows that may be happening at the same time or in the future.
-  // TODO: figure out how to best handle this situation. Perhaps we can use an expected workflow start time, and perform the absolute allocations based
-  // on that? Therefore all allocation will be absolute.
-  NFD_LOG_DEBUG("NFDServiceDiscovery - resourceAllocation: Service " << serviceName << " finished running. Setting resourceBusy = false (resource unlocked/released).");
+  ns3::Time timeNow = ns3::Simulator::Now();
+  int64_t timeNowUS = timeNow.ToInteger(ns3::Time::US); // Convert to integer
+  auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+  NFD_LOG_INFO("NFDServiceDiscovery - resourceAllocation: Service " << serviceName << " finished running on node " << (*node).GetId() << ". Setting resourceBusy = false (resource unlocked at " << timeNowUS << " microseconds).");
   //NFD_LOG_DEBUG("NFDServiceDiscovery - resourceAllocation: Service finished running. Setting resourceBusy = false.");
   //Forwarder::onIncomingDataAfterServiceRuns(data, ingress); // finish processing the incoming data packet.
   Forwarder::onIncomingDataAfterServiceRuns(*dataPtr, *ingressPtr); // finish processing the incoming data packet.
@@ -1801,13 +1817,28 @@ Forwarder::onOutgoingData(const Data& data, Face& egress)
   std::string simpleStringName = simpleName.toUri();
   if (simpleStringName == "/nesco" || simpleStringName == "/nescoSCOPT" || simpleStringName == "/orchA" || simpleStringName == "/orchB")
   {
-    if (egress.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+    if (data.getName().getPrefix(-1).getSubName(1,1).toUri() == "/serviceDiscovery" ||
+        data.getName().getPrefix(-1).getSubName(1,1).toUri() == "/schedulerRelease")
     {
-      NFD_LOG_INFO("     CABEEE: onOutgoingDataToApp (to the consuming application only) =" << " name=" << data.getName());
+      if (egress.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+      {
+        NFD_LOG_INFO("     CABEEE: onOutgoingSDDataToApp (to the consuming application only) =" << " name=" << data.getName());
+      }
+      else
+      {
+        NFD_LOG_INFO("     CABEEE: onOutgoingSDDataToFace (to another NFD node on a physical face) =" << " name=" << data.getName());
+      }
     }
     else
     {
-      NFD_LOG_INFO("     CABEEE: onOutgoingDataToFace (to another NFD node on a physical face) =" << " name=" << data.getName());
+      if (egress.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+      {
+        NFD_LOG_INFO("     CABEEE: onOutgoingWFDataToApp (to the consuming application only) =" << " name=" << data.getName());
+      }
+      else
+      {
+        NFD_LOG_INFO("     CABEEE: onOutgoingWFDataToFace (to another NFD node on a physical face) =" << " name=" << data.getName());
+      }
     }
   }
   if (egress.getId() == face::INVALID_FACEID) {
