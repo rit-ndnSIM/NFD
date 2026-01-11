@@ -46,8 +46,13 @@ using json = nlohmann::json;
 
 struct Service {
     std::string name;
+    int64_t inputsReadyTime;
     int64_t start;
     int64_t end;
+    std::string face;
+
+    // Helper to get duration, which is constant regardless of sliding
+    int duration() const { return end - start; }
 };
 
 
@@ -262,6 +267,9 @@ private:
   void
   sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint& ingress,
                      const shared_ptr<pit::Entry>& pitEntry);
+  void
+  sendEFTdataUpdate(std::string nameAndHash, int64_t lowestEFT);
+
 
   /** \brief insert Nonce to Dead Nonce List if necessary
    *  \param upstream if null, insert Nonces from all out-records;
@@ -276,6 +284,9 @@ private:
 
   void
   sendSchedulerReleaseInterestUpstream(const std::string nameAndHash, const std::string lowestFace);
+
+  void
+  scheduleCompaction(void);
 
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
   /**

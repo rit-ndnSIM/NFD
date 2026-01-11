@@ -47,6 +47,7 @@ using json = nlohmann::json;
 
 #include "ndn-cxx/mgmt/nfd/fib-entry.hpp"
 
+
 namespace nfd {
 
 NFD_LOG_INIT(Forwarder);
@@ -119,7 +120,10 @@ m_SDservTracker = {
       "faceIN": {
           "inID": faceID1,                            // faceID where an interest for this service/pDAG has been received.
           "inName": "/service1/SDpDAG_param_hash",    // Notice we store the original name as received so we can respond with the same name when data arrives.
-          "resourceAllocation": <1 or 2>,             // We add the setting for resource allocation: 1 - don't allocate, 2 - use allocation
+          "serviceDiscovery": <0 or 1>,               // We add the setting for service discovery: 0 - disabled, 1 - enabled
+          "resourceAllocation": <0 or 1>,             // We add the setting for resource allocation: 0 - disabled, 1 - enabled
+          "allocationReuse": <0 or 1>,                // We add the setting for allocation reuse of previous slots: 0 - disabled, 1 - enabled
+          "scheduleCompaction": <0 or 1>,             // We add the setting for schedule compaction: 0 - disabled, 1 - enabled
           "dag": { <pDag as received> },              // We add the pDAG here so that we can generate the name we use for the FIB entry that we create at the end. (serviceDiscovery interest application parameter has more info than regular workflow interest).
           "head": <service head as received>,         // We add the service head so that we can generate the name we use for the FIB entry that we create at the end. (serviceDiscovery interest application parameter has more info than regular workflow interest).
           "serviceDiscoveryStartTimeNS": <absolute SD start time>,      // set and initially sent by the consumer
@@ -129,7 +133,8 @@ m_SDservTracker = {
             "WFnameAndHash": "/service1/WFpDAG_param_hash",             // WFnameAndHash name could match with other ones below
             "inputsReadyTime": <absolute time when all inputs have been received>,
             "start": <absolute start time>,
-            "end": <absolute end time>
+            "end": <absolute end time>,
+            "face": <faceID for service>              // this should always be the local face
           }
       },
       "faceOUT": {
@@ -152,7 +157,10 @@ m_SDservTracker = {
       "faceIN": {
           "inID": faceID1,                            // faceID where an interest for this service/pDAG has been received.
           "inName": "/service1/SDpDAG_param_hash",    // Notice we store the original name as received so we can respond with the same name when data arrives.
-          "resourceAllocation": <1 or 2>,             // We add the setting for resource allocation: 1 - don't allocate, 2 - use allocation
+          "serviceDiscovery": <0 or 1>,               // We add the setting for service discovery: 0 - disabled, 1 - enabled
+          "resourceAllocation": <0 or 1>,             // We add the setting for resource allocation: 0 - disabled, 1 - enabled
+          "allocationReuse": <0 or 1>,                // We add the setting for allocation reuse of previous slots: 0 - disabled, 1 - enabled
+          "scheduleCompaction": <0 or 1>,             // We add the setting for schedule compaction: 0 - disabled, 1 - enabled
           "dag": { <pDag as received> },              // We add the pDAG here so that we can generate the name we use for the FIB entry that we create at the end. (serviceDiscovery interest application parameter has more info than regular workflow interest).
           "head": <service head as received>,         // We add the service head so that we can generate the name we use for the FIB entry that we create at the end. (serviceDiscovery interest application parameter has more info than regular workflow interest).
           "serviceDiscoveryStartTimeNS": <absolute SD start time>,      // set and initially sent by the consumer
@@ -162,7 +170,8 @@ m_SDservTracker = {
             "WFnameAndHash": "/service1/WFpDAG_param_hash",             // WFnameAndHash name could match with other ones below
             "inputsReadyTime": <absolute time when all inputs have been received>,
             "start": <absolute start time>,
-            "end": <absolute end time>
+            "end": <absolute end time>,
+            "face": <faceID for service>              // this should always be the local face
       },
       "faceOUT": {
           "faceID3": {                // faceID where the interest has been forwarded to
@@ -284,12 +293,13 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
     auto appParameterFromInterest = interest.getApplicationParameters();
     std::string nameAndHashToRemove = std::string(reinterpret_cast<const char*>(appParameterFromInterest.value()), appParameterFromInterest.value_size());
     NFD_LOG_DEBUG("NFDServiceDiscovery - received schedulerRelease message for " << nameAndHashToRemove << std::endl);
-    //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on schedulerReleaseFromApp Interest): " << std::setw(2) << m_SDservTracker << '\n');
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on schedulerReleaseFromApp Interest): " << std::setw(2) << m_SDservTracker << '\n');
     for (auto& serviceIterator : m_SDservTracker.items())
     {
       //NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease evaluating service " << serviceIterator.key() << " with inName " << m_SDservTracker[serviceIterator.key()]["faceIN"]["inName"] << std::endl);
       if (m_SDservTracker[serviceIterator.key()]["faceIN"]["inName"] == nameAndHashToRemove)
       {
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure for just the service that will be deallocated (on interest for schedulerRelease): " << '\n' << serviceIterator.key() << '\n' << std::setw(2) << m_SDservTracker[serviceIterator.key()] << '\n');
         if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
         {
           NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease removing scheduled service " << nameAndHashToRemove << std::endl);
@@ -301,25 +311,21 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
           m_SDservTracker[serviceIterator.key()]["faceIN"].erase("serviceScheduling");
 
 
-          // TODO: check if we can move other allocated services to run sooner. They will be limited by when they receive all their inputs.
-/*
-          "serviceScheduling": {                      // If the service has been scheduled to run in this node, we will see this entry. Otherwise, it won't exist
-            "WFnameAndHash": "/service1/WFpDAG_param_hash",   // WFnameAndHash name could match with other ones below
-            "inputsReadyTime": <absolute time when all inputs have been received>
-            "start": <absolute start time>,
-            "end": <absolute end time>
-*/
-
+          // SCHEDULE COMPACTION - LEFT-PACKING
+          if (m_SDservTracker[serviceIterator.key()]["faceIN"]["scheduleCompaction"] == 1)  // if we have it set up for doing schedule compaction
+          {
+            this->scheduleCompaction();
+          }
 
 
           // Once a service APP receives this interest, it will look at this service's inputs, and generate schedulerRelease messages for those.
-          NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease will now send request further upststream to the service APP using name " << serviceIterator.key() << std::endl);
+          NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease will now send request further upstream to the service APP using name " << serviceIterator.key() << std::endl);
           // send the request further upstream
           sendSchedulerReleaseInterestUpstream(serviceIterator.key(), "");
         }
         else
         {
-          NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease will now send request further upststream using name " << serviceIterator.key() << std::endl);
+          NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease will now send request further upstream using name " << serviceIterator.key() << std::endl);
           // send the request further upstream
           sendSchedulerReleaseInterestUpstream(serviceIterator.key(), "");
         }
@@ -402,7 +408,10 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
       m_SDservTracker[jsonName]["faceIN"]["inName"] = interest.getName().toUri(); // we record the original name as it came in, so we know what name to use when we respond with data downstream.
       m_SDservTracker[jsonName]["faceIN"]["dag"] = dagObject["dag"];              // we capture the pDag here so that we can use it to generate the name we use for the FIB entry  we create later.
       m_SDservTracker[jsonName]["faceIN"]["head"] = dagObject["head"];            // we capture the "head" here so that we can use it to generate the name&hash we use for the FIB entry  we create later.
-      m_SDservTracker[jsonName]["faceIN"]["resourceAllocation"] = dagObject["resourceAllocation"];  // we capture the "resourceAllocation" setting here so that we know if we'll need to perform resource allocation later
+      m_SDservTracker[jsonName]["faceIN"]["serviceDiscovery"] = dagObject["serviceDiscovery"];  // we capture the setting here so that we know if we'll need to perform this later
+      m_SDservTracker[jsonName]["faceIN"]["resourceAllocation"] = dagObject["resourceAllocation"];  // we capture the setting here so that we know if we'll need to perform this later
+      m_SDservTracker[jsonName]["faceIN"]["allocationReuse"] = dagObject["allocationReuse"];  // we capture the setting here so that we know if we'll need to perform this later
+      m_SDservTracker[jsonName]["faceIN"]["scheduleCompaction"] = dagObject["scheduleCompaction"];  // we capture the setting here so that we know if we'll need to perform this later
       m_SDservTracker[jsonName]["faceIN"]["WFinterestRxedTime"] = timeNowNS + WFstartTimeNS - SDstartTimeNS;  // we capture the "WFinterestRxedTime" here so that we can use it for allocation slot reuse calculations later.
     }
     //if (!m_SDservTracker[jsonName].contains("faceOUT"))
@@ -482,7 +491,7 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
 
     } // FIB iteration for loop
 
-    //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Interest): " << std::setw(2) << m_SDservTracker << '\n');
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Interest): " << std::setw(2) << m_SDservTracker << '\n');
     return;
   }
 
@@ -519,6 +528,286 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
 
   }
 }
+
+
+
+
+
+void
+Forwarder::scheduleCompaction(void)
+{
+  // SCHEDULE COMPACTION - LEFT-PACKING --------------------------------------------------------------------------------------------------------------------------------
+
+  // check if we can move other allocated services to run sooner. They will be limited by when they receive all their inputs.
+  // Initially I can just make local adjustments. Eventually we can also communicate the earlier EFTs to services downstream and perhaps adjust their allocations too.
+
+  // 1. Parse into vector (Storage)
+  std::vector<Service> scheduledVector;
+  // Use reserve if possible to prevent pointer invalidation, though not strictly required if we don't add elements later
+  scheduledVector.reserve(m_SDservTracker.size()); 
+
+  for (auto& serviceIterator : m_SDservTracker.items())
+  {
+    if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
+    {
+      scheduledVector.push_back({
+          serviceIterator.key(),
+          m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["inputsReadyTime"],
+          m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"],
+          m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"]
+          //m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["face"] // no need, this field shouldn't be changing
+      });
+    }
+  }
+
+  // 2. Group by Time Slot
+  // Map Key: {start, end} pair. 
+  // Map Value: Vector of pointers to the Service objects in 'scheduledVector'
+  // usage: std::map sorts by the Key automatically (Start time, then End time)
+  std::map<std::pair<int64_t, int64_t>, std::vector<Service*>> timeSlotGroups;
+
+  for (auto& s : scheduledVector)
+  {
+      timeSlotGroups[{s.start, s.end}].push_back(&s);
+  }
+
+  // 3. Compaction Loop (Iterate over GROUPS, not individual items)
+  int64_t resourceFreeTime = 0; 
+  std::vector<Service> newEFTsToReport;
+
+  for (auto& group : timeSlotGroups)
+  {
+      // 'group.first' is the Pair {oldStart, oldEnd}
+      // 'group.second' is the vector of Service pointers
+      
+      int64_t oldStart = group.first.first;
+      int64_t oldEnd   = group.first.second;
+      int64_t duration = oldEnd - oldStart;
+
+      // A. Find the limiting 'inputsReadyTime' for this entire group
+      //    The group cannot start until the SLOWEST member is ready.
+      int64_t groupMaxInputsReady = 0;
+      for (const auto* s : group.second)
+      {
+          groupMaxInputsReady = std::max(groupMaxInputsReady, s->inputsReadyTime);
+      }
+
+      // B. Calculate the new start time for the GROUP
+      int64_t newStart = std::max(resourceFreeTime, groupMaxInputsReady);
+      int64_t newEnd   = newStart + duration;
+
+      // C. Apply changes to all members of the group
+      for (auto* s : group.second) 
+      {
+          if (newStart != s->start)
+          {
+              // Logging & Updates
+              NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease SCHEDULE COMPACTION - LEFT PACKING: sliding service " << s->name << " previously starting at " << s->start << " and now starting at " << newStart);
+              
+              auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+              NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << s->name << " no longer scheduled on node " << (*node).GetId() << " starting at " << s->start << " and ending at " << s->end << " nanoseconds).");
+              NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << s->name << " scheduled on node " << (*node).GetId() << " starting at " << newStart << " and ending at " << newEnd << " nanoseconds).");
+
+              // TODO: should we adjust EFTs? Should we send messages downstream with updated EFTs after schedule compaction?
+              // TODO: should these be guaranteed to be sent out in workflow order??
+              //NFD_LOG_DEBUG("NFDServiceDiscovery - schedule compaction sendEFTdataUpdate for " << s->name << ", old EFT: " << s->end << ", new EFT: " << newEnd << std::endl);
+              //this->sendEFTdataUpdate(s->name, newEnd);
+              //if (s->start-newStart > 1000000) // if the difference is more than 1ms, then report the new EFT. Otherwise don't bother.
+              //{
+                newEFTsToReport.push_back({
+                   s->name,
+                    s->inputsReadyTime,
+                    newStart,
+                    newEnd
+                });
+              //}
+          }
+
+          // Update the Service object in the vector
+          s->start = newStart;
+          s->end   = newEnd;
+      }
+
+      // D. Advance resource cursor
+      // We advance it by the duration of the group (since they run together)
+      resourceFreeTime = newEnd;
+  }
+
+  // 4. Sync back to JSON
+  std::unordered_map<std::string, const Service*> serviceMap;
+  for (const auto& s : scheduledVector)
+  {
+      serviceMap[s.name] = &s;
+  }
+
+  for (auto& serviceIterator : m_SDservTracker.items())
+  {
+    if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
+    {
+      if (serviceMap.find(serviceIterator.key()) != serviceMap.end())
+      {
+        const Service* modified = serviceMap[serviceIterator.key()];
+
+        // TODO: should we adjust EFTs? Should we send messages downstream with updated EFTs after schedule compaction?
+        // TODO: should these be guaranteed to be sent out in workflow order??
+        //if (m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] != modified->end)
+        //{
+          //NFD_LOG_DEBUG("NFDServiceDiscovery - schedule compaction sendEFTdataUpdate for " << serviceIterator.key() << ", old EFT: " << m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] << ", new EFT: " << modified->end << std::endl);
+          //this->sendEFTdataUpdate(serviceIterator.key(), modified->end);
+        //}
+
+        //m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = modified->inputsReadyTime; // no need, this field shouldn't be changing
+        m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"] = modified->start;
+        m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"]   = modified->end;
+        //m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["face"]   = modified->face; // no need, this field shouldn't be changing
+      }
+    }
+  }
+
+
+  // TODO: send the messages
+  // now we can report the new EFTs for all the shifted tasks
+  for (auto& s : newEFTsToReport)
+  {
+    //auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+    //if ((*node).GetId() == 3)
+    //{
+      //if (s.name == "/sensor/params-sha256=feb636491876861bbf6abace637d7f669c27bbe492c46e3a60241d3c57fc504d" ||
+          //s.name == "/sensor/params-sha256=ef2c82f7d5a35dade9775c22ef9bced5dfd54ce3813fa17f212cee4f6b4ccc0a" ||
+          //s.name == "/sensor/params-sha256=92dd58dd4460395c7ce8262c068596935a7def308c49df60d9400aaf5e585593"
+        //)
+      //{
+NFD_LOG_INFO("NFDServiceDiscovery - schedule compaction sendEFTdataUpdate for " << s.name << ", new EFT: " << s.end << std::endl);
+    this->sendEFTdataUpdate(s.name, s.end);
+      //}
+    //}
+  }
+
+
+
+
+/*
+
+  // parse all scheduled items into vector (so we can later sort them)
+  std::vector<Service> scheduledVector;
+  for (auto& serviceIterator : m_SDservTracker.items())
+  {
+    if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
+    {
+      scheduledVector.push_back({
+          serviceIterator.key(),
+          m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["inputsReadyTime"],
+          m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"],
+          m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"]
+          //m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["face"] // no need, this field shouldn't be changing
+      });
+    }
+    //m_SDservTracker[serviceIterator.key()]["faceIN"].erase("serviceScheduling");  // erase it for now? After left packing the vector, we will create new ones in this structure.
+  }
+
+  // Ensure sorted
+  std::sort(scheduledVector.begin(), scheduledVector.end(),
+            [](const Service& a, const Service& b){
+                return a.start < b.start;
+            });
+
+
+  // Initialize the resource availability cursor. If the node is available at T=0, set this to 0.
+  int64_t resourceFreeTime = 0; // just a place holder, no service will begin at time 0 since we always wait for inputs to be ready
+
+
+  // align inputsReadyTime so that all groups with matching start and end times will have the largest inputsReadyTime of the group
+  // Create a map to store the maximum inputsReadyTime for each unique slot
+  // Key: {start, end}, Value: max inputsReadyTime found
+  std::map<std::pair<int64_t, int64_t>, int64_t> maxReadyTimeMap;
+  // First Pass: Find the maximums
+  for (const auto& s : scheduledVector)
+  {
+      auto slot = std::make_pair(s.start, s.end);
+
+      // If slot doesn't exist, it initializes to 0 or the first value
+      // std::max handles the comparison automatically
+      maxReadyTimeMap[slot] = std::max(maxReadyTimeMap[slot], s.inputsReadyTime);
+  }
+  // Second Pass: Apply the maximums back to all matching entries
+  for (auto& s : scheduledVector)
+  {
+      auto slot = std::make_pair(s.start, s.end);
+      s.inputsReadyTime = maxReadyTimeMap[slot];
+  }
+
+
+  // Slide tasks
+  for (auto& s : scheduledVector)
+  {
+    int64_t duration = s.duration();
+
+    // The earliest this specific service can start is the LATER of:
+    // A) When the hardware resource becomes free (resourceFreeTime)
+    // B) When the inputs for this service are ready (s.inputsReadyTime)
+    int64_t newStart = std::max(resourceFreeTime, s.inputsReadyTime);
+    if (newStart != s.start)
+    {
+      NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease SCHEDULE COMPACTION - LEFT PACKING: sliding service " << s.name << " previously starting at " << s.start << " and now starting at " << newStart);
+      auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+      NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << s.name << " no longer scheduled on node " << (*node).GetId() << " starting at " << s.start << " and ending at " << s.end << " nanoseconds).");
+      NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << s.name << " scheduled on node " << (*node).GetId() << " starting at " << newStart << " and ending at " << newStart + duration << " nanoseconds).");
+
+      // TODO: should we adjust EFTs? Should we send messages downstream with updated EFTs after schedule compaction?
+      // TODO: should these be guaranteed to be sent out in workflow order??
+NFD_LOG_INFO("NFDServiceDiscovery - schedule compaction sendEFTdataUpdate for " << s.name << ", old EFT: " << s.end << ", new EFT: " << newStart+duration << std::endl);
+      this->sendEFTdataUpdate(s.name, newStart+duration);
+    }
+
+    // Update the service
+    s.start = newStart;
+    s.end = newStart + duration;
+
+    // Move the resource cursor to the end of this newly compacted task
+    resourceFreeTime = s.end;
+  }
+
+
+  // Now copy the new allocations over from the vector to the JSON data structure
+  // Create a lookup map for O(1) access. Key: serviceName, Value: Pointer to the Service object
+  std::unordered_map<std::string, const Service*> serviceMap;
+  for (const auto& s : scheduledVector)
+  {
+    serviceMap[s.name] = &s;
+  }
+  // and iterate through the original JSON array
+  for (auto& serviceIterator : m_SDservTracker.items())
+  {
+    if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
+    {
+      // If this service exists in our modified vector, update the JSON
+      if (serviceMap.find(serviceIterator.key()) != serviceMap.end())
+      {
+        const Service* modified = serviceMap[serviceIterator.key()];
+        
+        // TODO: should we adjust EFTs? Should we send messages downstream with updated EFTs after schedule compaction?
+        // TODO: should these be guaranteed to be sent out in workflow order??
+        //if (m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] != modified->end)
+        //{
+          //NFD_LOG_DEBUG("NFDServiceDiscovery - schedule compaction sendEFTdataUpdate for " << serviceIterator.key() << ", old EFT: " << m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] << ", new EFT: " << modified->end << std::endl);
+          //this->sendEFTdataUpdate(serviceIterator.key(), modified->end);
+        //}
+
+        // Update the specific fields in the nested object
+        //m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = modified->inputsReadyTime; // no need, this field shouldn't be changing
+        m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"] = modified->start;
+        m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"]   = modified->end;
+        //m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["face"]   = modified->face; // no need, this field shouldn't be changing
+      }
+    }
+  }
+*/
+
+  // END OF SCHEDULE COMPACTION - LEFT-PACKING ------------------------------------------------------------------------------------------------------------------------------
+}
+
+
+
 
 void
 Forwarder::onInterestLoop(const Interest& interest, const FaceEndpoint& ingress)
@@ -930,11 +1219,37 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     std::string rxedDataNameAndHash = simpleNameAndHash.toUri();
 
 
+
+    bool updatedEFTmessage = false;
     NFD_LOG_DEBUG("NFDServiceDiscovery received data with name: " << rxedDataNameAndHash << " - faceID is: " << ingress.face.getId());
     // Upon receiving an SD data packet through a particular face, 
     // mark it as received through this face.
     if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] != 0)
+    {
       NFD_LOG_WARN("NFDServiceDiscovery, ERROR??? Should this happen? We received a data packet through this face again: " << rxedDataNameAndHash << ", for face with faceID: " << ingress.face.getId());
+      updatedEFTmessage = true;
+/*      
+      // TODO: if serviceScheduling exists in this entry
+        // then this is an updateEFT message.
+        // dont' bother looking for a new slot or anything like that, simply update the "inputsReadyTime" value in the data structure and then run the schedule compating code
+      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
+      {
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = allInputsReceivedEFT;
+        //m_SDservTracker[rxedDataNameAndHash]["faceIN"].erase("serviceScheduling");
+      }
+      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["scheduleCompaction"] == 1)  // if we have it set up for doing schedule compaction
+      {
+        this->scheduleCompaction();
+      }
+      return;
+*/
+    }
+
+
+
+
+
+
     m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] = 1;
 
 
@@ -996,6 +1311,28 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
 
 
+/*
+    if (updatedEFTmessage == true)
+    {
+      // TODO: if serviceScheduling exists in this entry
+        // then this is an updateEFT message.
+        // dont' bother looking for a new slot or anything like that, simply update the "inputsReadyTime" value in the data structure and then run the schedule compating code
+      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
+      {
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = eftNS;
+        //m_SDservTracker[rxedDataNameAndHash]["faceIN"].erase("serviceScheduling");
+      }
+      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["scheduleCompaction"] == 1)  // if we have it set up for doing schedule compaction
+      {
+        this->scheduleCompaction();
+      }
+      return;
+    }
+*/
+
+
+
+
     //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data): " << std::setw(2) << m_SDservTracker << '\n');
 
     // check if all data has been received now
@@ -1021,6 +1358,14 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
       //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after allRxed): " << std::setw(2) << m_SDservTracker << '\n');
 
+      // TODO: We first check if an allocation for this service has already been made. This would happen if after schedule compaction, an updated EFT is reported.
+      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
+      {
+        // TODO: can we simply delete the allocation, and let the code below look for a new (and potentially better) spot?
+        NFD_LOG_DEBUG("NFDServiceDiscovery, all data packets for " << rxedDataNameAndHash << " had already been received, but we received a new one, so it must be an EFT recalculation after schedule compaction.");
+        //m_SDservTracker[rxedDataNameAndHash]["faceIN"].erase("serviceScheduling");
+      }
+
 
       // this lowestEFT calculation determines the EFT for the path that can get results the quickest.
       int64_t lowestEFT = -1;  // initialize to invalid EFT
@@ -1042,6 +1387,8 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
           lowestEFT = thisEFT; // this becomes the lowest EFT found so far
           lowestFace = faceIterator.key(); // initialize to the first one
         }
+
+
 
         // also keep track of lowest EFT for "non-local" faces
         Face* realFaceIterator;
@@ -1073,7 +1420,24 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       NFD_LOG_DEBUG("NFDServiceDiscovery, WF interest for " << rxedDataNameAndHash << " will be received at time " << WFinterestRxedTime);
       NFD_LOG_DEBUG("NFDServiceDiscovery, lowestEFT of all inputs is " << allInputsReceivedEFT << " on face " << lowestFace << ", lowestNonLocalEFT is " << lowestNonLocalEFT << " on face " << lowestNonLocalFace << ". Now determining CPU scheduling...");
 
+      
 
+      if (updatedEFTmessage == true)
+      {
+        // TODO: if serviceScheduling exists in this entry
+          // then this is an updateEFT message.
+          // dont' bother looking for a new slot or anything like that, simply update the "inputsReadyTime" value in the data structure and then run the schedule compating code
+        if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
+        {
+          m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = allInputsReceivedEFT;
+          //m_SDservTracker[rxedDataNameAndHash]["faceIN"].erase("serviceScheduling");
+          if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["scheduleCompaction"] == 1)  // if we have it set up for doing schedule compaction
+          {
+            this->scheduleCompaction();
+          }
+        }
+        return;
+      }
 
 
       // create name&pDAG just like it will be created by the regular consumer when the real workflow runs. The application parameters are different (less of them), so the hash will be different.
@@ -1102,7 +1466,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
 
 
-      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceAllocation"] == 1)
+      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceAllocation"] == 0)
       {
         // Here we take into account the time taken to run the service, and add it to the EFT.
         // We just want to add the service latency to the EFT, assuming the service can start running right away.
@@ -1130,7 +1494,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
 
 
-      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceAllocation"] == 2)
+      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceAllocation"] == 1)
       {
 
         // DETERMINE CPU SCHEDULING - ALLOCATION
@@ -1161,27 +1525,35 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
 
 
-          NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (before looking at allocation reuse): " << std::setw(2) << m_SDservTracker << '\n');
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (before looking at allocation reuse): " << std::setw(2) << m_SDservTracker << '\n');
 
 
           // Check if the WFname&hash exists in the currently allocated services and that it can be reused.
           int64_t previousAllocationEFT = -1; // default value before we start analyzing EFTs.
-          for (auto& serviceIterator : m_SDservTracker.items())
+          int64_t previousAllocationStart = -1; // default value before we start analyzing EFTs.
+          std::string previousAllocationFace;
+          if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["allocationReuse"] == 1)  // if we have it set up for doing allocation reuse of previously allocated slots
           {
-            if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
+            for (auto& serviceIterator : m_SDservTracker.items())
             {
-              if (m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["WFnameAndHash"] == futureWFnameAndHashString)
+              if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
               {
-                // If this node doesn't use caching and the previously allocated service finishes later than when the WF interest for this latest iteration of the service would arrive, then we reuse the already allocated version.
-                // An extra PIT entry will be added and will be able to be satisfied once the already allocated service runs.
-                // If this node uses caching (content store), then we just look for the best previously allocated slot (any end time is OK to reuse)
-                // m_cs.size() gives us the number of currently cached data packets. m_cs.getLimit() give us the cache size.
-                if (m_cs.getLimit() > 0 || m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] > WFinterestRxedTime )
+                if (m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["WFnameAndHash"] == futureWFnameAndHashString)
                 {
-                  NFD_LOG_DEBUG("NFDServiceDiscovery scheduling with no caching - Found a way to reuse allocation for " << futureWFnameAndHashString << ", which was scheduled to finish at: " << m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] << ", with serviceLatency = " << serviceLatency);
-                  if (previousAllocationEFT == -1 || previousAllocationEFT > m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"]) // now we look for the lowest EFT of the previously allocated slots (look for the best one).
+                  // If this node doesn't use caching and the previously allocated service finishes later than when the WF interest for this latest iteration of the service would arrive, then we reuse the already allocated version.
+                  // An extra PIT entry will be added and will be able to be satisfied once the already allocated service runs.
+                  // If this node uses caching (content store), then we just look for the best previously allocated slot (any end time is OK to reuse)
+                  // m_cs.size() gives us the number of currently cached data packets. m_cs.getLimit() give us the cache size.
+                  //if (m_cs.getLimit() > 0 || m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] > WFinterestRxedTime)
+                  if (m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"] > allInputsReceivedEFT) // only reuse a slot if it starts after all inputs for this service have been received. This way, if the previous allocation is removed, we can truly still use this one.
                   {
-                    previousAllocationEFT = m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"];
+                    NFD_LOG_DEBUG("NFDServiceDiscovery scheduling with no caching - Found a way to potentially reuse allocation for " << futureWFnameAndHashString << ", which was scheduled to finish at: " << m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] << ", with serviceLatency = " << serviceLatency);
+                    if (previousAllocationEFT == -1 || previousAllocationEFT > m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"]) // now we look for the lowest EFT of the previously allocated slots (look for the best one).
+                    {
+                      previousAllocationEFT = m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"];
+                      previousAllocationStart = m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"];
+                      previousAllocationFace = m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["face"];
+                    }
                   }
                 }
               }
@@ -1204,6 +1576,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
             {
               scheduledVector.push_back({
                   serviceIterator.key(),
+                  m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["inputsReadyTime"],
                   m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"],
                   m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"]
               });
@@ -1280,34 +1653,34 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
 
           // There are THREE options. 1) Use previous allocation. 2) Use new allocation locally. 3) Use non-local Face.
-          // Pick the earliest EFT of the three. If using a previous allocation, no need to allocate CPU again, and no need to add FIB entry.
+          // Pick the earliest EFT of the three.
+          // If using a previous allocation, we create a replicated allocation slot again so that any schedulerRelease messages will only release a single slot without breaking dependencies for the services that were reusing that slot.
+          // If using a previous allocation, there is no need to add a new FIB entry.
           if (previousAllocationEFT != -1 && previousAllocationEFT <= earliestEndPossible)
           {
             NFD_LOG_DEBUG("NFDServiceDiscovery - reusing an allocation spot from a previous scheduled service instance.");
             lowestEFT = previousAllocationEFT;
-            // TODO: generate schedulerRelease messages for the inputs for the service that was going to go into this new allocation slot that is now not needed.
-            // send schedulerRelease message to each face where the inputs for this latest local version of the service may have come from - they are no longer needed to run elsewhere since the previously allocated version's EFT is lower.
-            // may require a for loop to go through inputs?
-            // for (each input)
-            //{
-              //sendSchedulerReleaseInterestUpstream(rxedDataNameAndHash of input, lowestFace);
-            //}
+
+            // creating a copy of the allocated slot (as done below) prevents reused allocations from disappearing when a schedulerRelease message is received for a different version of the allocated slot. A slot is truly only release if no other versions of a service require it.
+            if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
+            {
+              NFD_LOG_ERROR("NFD SD Forwarding ERROR!! This service has already been scheduled!!!!");
+            }
+            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["WFnameAndHash"] = futureWFnameAndHashString;
+            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = allInputsReceivedEFT;
+            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] = previousAllocationStart;
+            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] = previousAllocationEFT;
+            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["face"] = previousAllocationFace;
+            // print info level message with node id, start and stop time, so process script can see it
+            auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+            NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << rxedDataNameAndHash << " scheduled on node " << (*node).GetId() << " starting at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] << " and ending at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] << " nanoseconds). This is an allocation reuse.");
+            //lowestFace = previousAllocationLowestFace; // if we are reusing a previous allocation, its lowestFace will be the local face, which won't require a FIB entry to be created.
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure for just this service (on Data after scheduled): " << '\n' << rxedDataNameAndHash << '\n' << std::setw(2) << m_SDservTracker[rxedDataNameAndHash] << '\n');
           }
 
           // Then re-evaluate if running locally is still the lowest EFT (or if it's our only choice - in which case lowestNonLocalEFT would still be zero).
           else if ((earliestEndPossible < lowestNonLocalEFT) || (lowestNonLocalEFT == -1)) // if yes, then schedule it locally
           {
-            if (previousAllocationEFT != -1 && previousAllocationEFT > earliestEndPossible)
-            {
-              // TODO: (only if caching?) generate schedulerRelease messages for the inputs for the previously allocated service that is now not needed.
-              // send schedulerRelease message to each face where the inputs for the previously allocated version of the service may have come from - they are no longer needed to run elsewhere since the newly allocated version's EFT is lower.
-              // may require a for loop to go through inputs?
-              // for (each input)
-              //{
-                //sendSchedulerReleaseInterestUpstream(rxedDataNameAndHash of input, lowestFace);
-              //}
-            }
-
             if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
             {
               NFD_LOG_ERROR("NFD SD Forwarding ERROR!! This service has already been scheduled!!!!");
@@ -1317,6 +1690,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
             m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = allInputsReceivedEFT;
             m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] = earliestStartPossible;
             m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] = earliestEndPossible;
+            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["face"] = lowestFace;
             lowestEFT = earliestEndPossible;
             //lowestFace = lowestFace; // if we are here, lowestFace will be the local face already.
 
@@ -1324,7 +1698,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
             auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
             NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << rxedDataNameAndHash << " scheduled on node " << (*node).GetId() << " starting at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] << " and ending at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] << " nanoseconds).");
 
-            NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure for just this service (on Data after scheduled): " << std::setw(2) << m_SDservTracker[rxedDataNameAndHash] << '\n');
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure for just this service (on Data after scheduled): " << '\n' << rxedDataNameAndHash << '\n' << std::setw(2) << m_SDservTracker[rxedDataNameAndHash] << '\n');
             if (earliestStartPossible > allInputsReceivedEFT)
             {
               NFD_LOG_DEBUG("NFDServiceDiscovery - FYI: inputs are arriving before allocation slot!!");
@@ -1343,7 +1717,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
           }
 
 
-          //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after scheduled): " << std::setw(2) << m_SDservTracker << '\n');
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after scheduled): " << std::setw(2) << m_SDservTracker << '\n');
 
 
 
@@ -1355,7 +1729,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
         }
 
 
-        //TODO: is this where I want to send schedulerRelease messages to all faces that aren't the lowestFace? Or do it above (but then it skips 4DAG schedulerRelease for service1/c278, where we have multiple outgoing faces but the service is not hosted locally.
+        // send schedulerRelease messages to each face (except the lowest cost face) where the same service results may have come from - they are no longer needed to run elsewhere other than the lowest cost face.
         sendSchedulerReleaseInterestUpstream(rxedDataNameAndHash, lowestFace);
 
         NFD_LOG_DEBUG("NFDServiceDiscovery - scheduling done");
@@ -1406,53 +1780,9 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
 
 
-
-      // create data packet, but use stored name/hash!
-      std::string storedName = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["inName"];
-      auto new_data = std::make_shared<ndn::Data>(storedName);
-      new_data->setFreshnessPeriod(data.getFreshnessPeriod());
-
-      unsigned char myBuffer[1024];
-      json dataPacketContents;
-      ns3::Time timeNow;
-      timeNow = ns3::Simulator::Now();
-      // Convert to integer in milliseconds and then to string
-      int64_t timeNowNS = timeNow.ToInteger(ns3::Time::NS);
-      std::string timeStringNS = std::to_string(timeNowNS);
-      dataPacketContents["txTime"] = timeNowNS;
-      dataPacketContents["EFT"] = lowestEFT;
-
-      std::string dataPacketString = dataPacketContents.dump();
-      
-      //NFD_LOG_DEBUG("The data packet EFT (lowest) is " << lowestEFT);
-      //NFD_LOG_DEBUG("The data packet string is " << dataPacketString);
-
-      // instead of just writing a single value to the buffer, now we write the JSON data structure containing EFT and tx timestamp
-      // write to the buffer, after making sure it's big enough
-      if (strlen(dataPacketString.c_str())+1 > 1024) // string length plus NULL terminating character
-      {
-        NFD_LOG_ERROR("NFD SD Forwarding ERROR!! The data packet size is larger than 1024!!!");
-      }
-      //else
-      //{
-        //NFD_LOG_DEBUG("The data packet size using strlen+1 is " << strlen(dataPacketString.c_str())+1);
-        //NFD_LOG_DEBUG("The data packet size using length+1 operator is " << dataPacketString.length()+1);
-      //}
-      memcpy(myBuffer, dataPacketString.c_str(), strlen(dataPacketString.c_str())+1);
-      //new_data->setContent(myBuffer, 1024); // make the data always 1024 bytes long
-      new_data->setContent(myBuffer, strlen(dataPacketString.c_str())+1); // make the data just big enough to fit the json object
-
-      new_data->setSignatureInfo(ndn::SignatureInfo(tlv::NullSignature));
-      new_data->setSignatureValue(std::make_shared<ndn::Buffer>());
-      new_data->wireEncode();
-      //NFD_LOG_DEBUG("Sending Data packet for " << new_data->getName());
+      this->sendEFTdataUpdate(rxedDataNameAndHash, lowestEFT);
 
 
-      // we now only have one IN face
-      Face* downFace = m_faceTable.get(m_SDservTracker[rxedDataNameAndHash]["faceIN"]["inID"]);
-      NFD_LOG_DEBUG("NFDServiceDiscovery, data packet for " << rxedDataNameAndHash << " is being sent downstream through face " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["inID"]);
-
-      this->onOutgoingData(*new_data, *downFace);
 
 
       // clear m_SDservTracker faceOUT entry FOR THIS SERVICE ONLY, so that if a new interest is received, we go looking for inputs again
@@ -1460,6 +1790,8 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       //m_SDservTracker.erase(rxedDataNameAndHash); // erase the entire entry
       //m_SDservTracker[rxedDataNameAndHash].erase("faceOUT"); // only erase the "faceOUT" portion, otherwise we would be removing the CPU scheduling information!
       // we can't just erase the faceOUT portion, because I'm trying to use it for disseminating schedulerRelease messages too! So instead we just reset all the values.
+      // Actually, we can just leave the values as they were. This way, after schedule compaction, an update message will trigger EFT adjustments even if only one input is updated.
+/*
       for (auto& faceIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
       {
         m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceIterator.key()]["intTx"] = 0;
@@ -1467,7 +1799,9 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
         m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceIterator.key()]["linkDelay"] = -1;
         m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceIterator.key()]["EFT"] = -1;
       }
-      //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after sending downstream): " << std::setw(2) << m_SDservTracker << '\n');
+*/
+
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after sending downstream): " << std::setw(2) << m_SDservTracker << '\n');
 
     } // end if (allRxed)
 
@@ -1688,6 +2022,62 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
 
 }
+
+
+
+void
+Forwarder::sendEFTdataUpdate(std::string nameAndHash, int64_t lowestEFT)
+{
+  // create data packet, but use stored name/hash!
+  std::string storedName = m_SDservTracker[nameAndHash]["faceIN"]["inName"];
+  auto new_data = std::make_shared<ndn::Data>(storedName);
+  //new_data->setFreshnessPeriod(data.getFreshnessPeriod());
+  new_data->setFreshnessPeriod(ndn::time::milliseconds(3000));
+
+  unsigned char myBuffer[1024];
+  json dataPacketContents;
+  ns3::Time timeNow;
+  timeNow = ns3::Simulator::Now();
+  // Convert to integer in milliseconds and then to string
+  int64_t timeNowNS = timeNow.ToInteger(ns3::Time::NS);
+  std::string timeStringNS = std::to_string(timeNowNS);
+  dataPacketContents["txTime"] = timeNowNS;
+  dataPacketContents["EFT"] = lowestEFT;
+
+  std::string dataPacketString = dataPacketContents.dump();
+  
+  //NFD_LOG_DEBUG("The data packet EFT (lowest) is " << lowestEFT);
+  //NFD_LOG_DEBUG("The data packet string is " << dataPacketString);
+
+  // instead of just writing a single value to the buffer, now we write the JSON data structure containing EFT and tx timestamp
+  // write to the buffer, after making sure it's big enough
+  if (strlen(dataPacketString.c_str())+1 > 1024) // string length plus NULL terminating character
+  {
+    NFD_LOG_ERROR("NFD SD Forwarding ERROR!! The data packet size is larger than 1024!!!");
+  }
+  //else
+  //{
+    //NFD_LOG_DEBUG("The data packet size using strlen+1 is " << strlen(dataPacketString.c_str())+1);
+    //NFD_LOG_DEBUG("The data packet size using length+1 operator is " << dataPacketString.length()+1);
+  //}
+  memcpy(myBuffer, dataPacketString.c_str(), strlen(dataPacketString.c_str())+1);
+  //new_data->setContent(myBuffer, 1024); // make the data always 1024 bytes long
+  new_data->setContent(myBuffer, strlen(dataPacketString.c_str())+1); // make the data just big enough to fit the json object
+
+  new_data->setSignatureInfo(ndn::SignatureInfo(tlv::NullSignature));
+  new_data->setSignatureValue(std::make_shared<ndn::Buffer>());
+  new_data->wireEncode();
+  //NFD_LOG_DEBUG("Sending Data packet for " << new_data->getName());
+
+  // we now only have one IN face
+  Face* downFace = m_faceTable.get(m_SDservTracker[nameAndHash]["faceIN"]["inID"]);
+  NFD_LOG_DEBUG("NFDServiceDiscovery, data packet for " << nameAndHash << " is being sent downstream through face " << m_SDservTracker[nameAndHash]["faceIN"]["inID"]);
+
+  this->onOutgoingData(*new_data, *downFace);
+}
+
+
+
 
 void
 Forwarder::onIncomingDataAfterServiceRuns(const Data& data, const FaceEndpoint& ingress)
@@ -1958,16 +2348,18 @@ Forwarder::sendSchedulerReleaseInterestUpstream(const std::string nameAndHash, c
         {
           NFD_LOG_DEBUG("NFDServiceDiscovery - sending schedulerRelease message for " << nameAndHash << " upstream through face " << thisFace->getId() << std::endl);
           thisFace->sendInterest(*interestSchedulerRelease);
-          m_SDservTracker[nameAndHash]["faceOUT"].erase(faceIterator.key()); // only erase the entry for the "faceOUT" we are sending the message to.
-          done = true;
-          break;
+          // TODO: I used to have the following code in, why? I don't think I need to erase the faceOUT entries.
+          //m_SDservTracker[nameAndHash]["faceOUT"].erase(faceIterator.key()); // only erase the entry for the "faceOUT" we are sending the message to.
+          // TODO: I used to have the following code in, why? I don't think I need to end the loops early, since we need to generate scheduler release messages for all faces except the lowestCost
+          //done = true;
+          //break;
         }
       }
     }
-    if (done == true)
-    {
-      break;
-    }
+    //if (done == true)
+    //{
+      //break;
+    //}
   }
 }
 
