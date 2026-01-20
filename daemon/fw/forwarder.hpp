@@ -151,7 +151,7 @@ public:
   setConfigFile(ConfigFile& configFile);
 
   void
-  allocateResource(const std::string& serviceName, const Data& data, const FaceEndpoint& ingress);
+  allocateResource(const std::string& serviceName, const Data& data, const FaceEndpoint& ingress, uint64_t makespanNS);
 
   void
   freeResource(const std::string& serviceName, const Data& data, const FaceEndpoint& ingress);

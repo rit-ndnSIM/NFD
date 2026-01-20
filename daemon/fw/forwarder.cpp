@@ -1639,7 +1639,10 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
 
     // CPU ALLOCATION CHECK
-    if (data.getName().getPrefix(1).toUri() == "/nesco")
+    if (data.getName().getPrefix(1).toUri() == "/nesco" ||
+        data.getName().getPrefix(1).toUri() == "/nescoSCOPT" ||
+        data.getName().getPrefix(1).toUri() == "/orchA" ||
+        data.getName().getPrefix(1).toUri() == "/orchB")
     {
       if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) // only if data is coming from local face (if coming from local, it's from a service, and thus we need to report resource usage).
       {
@@ -1647,7 +1650,19 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
         //m_resourceBusy = true;
         //NFD_LOG_DEBUG("NFDServiceDiscovery - resourceAllocation: Service " << name1String << " started running. Setting resourceBusy = true.");
         //ns3::Simulator::Schedule(ns3::Seconds(0.001), &Forwarder::freeResource, this, name1String); //schedule the release of the semaphore (this is how long it takes to run the service).
-        Forwarder::allocateResource(name1String, data, ingress);
+
+        //NFD_LOG_DEBUG("Now reading it into string...");
+        std::string dataPacketString;
+        dataPacketString = (const char *)data.getContent().value();
+        //NFD_LOG_DEBUG("Data string received: " << dataPacketString);
+
+        //NFD_LOG_DEBUG("Now parsing it into JSON...");
+        json dataPacketContents = json::parse(dataPacketString);
+        //NFD_LOG_DEBUG("Data received: " << dataPacketContents);
+
+        uint64_t makespanNS = 1000000;
+        makespanNS = dataPacketContents["makespanNS"]; // we don't really do anything with the previous service's makespan here.
+        Forwarder::allocateResource(name1String, data, ingress, makespanNS);
 
         //while (m_resourceBusy == true); // wait until this service finishes.
 
@@ -2097,7 +2112,7 @@ Forwarder::onIncomingDataAfterServiceRuns(const Data& data, const FaceEndpoint& 
 
 
 void
-Forwarder::allocateResource(const std::string& serviceName, const Data& data, const FaceEndpoint& ingress)
+Forwarder::allocateResource(const std::string& serviceName, const Data& data, const FaceEndpoint& ingress, uint64_t makespanNS)
 {
   auto dataPtr = std::make_shared<Data>(data);
   auto ingressPtr = std::make_shared<FaceEndpoint>(ingress);
@@ -2111,7 +2126,7 @@ Forwarder::allocateResource(const std::string& serviceName, const Data& data, co
 
     NFD_LOG_DEBUG("NFDServiceDiscovery - WFresourceAllocation: Service " << serviceName << " needs to start running on node " << (*node).GetId() << " but the node is busy running another service. Waiting 0.1ms and trying again. Current time: " << timeNowNS << " nanoseconds).");
     //ns3::Simulator::Schedule(ns3::MilliSeconds(0.1), &Forwarder::allocateResource, this, serviceName, data, ingress);
-    ns3::Simulator::Schedule(ns3::MicroSeconds(100), &Forwarder::allocateResource, this, serviceName, *dataPtr, *ingressPtr);
+    ns3::Simulator::Schedule(ns3::MicroSeconds(100), &Forwarder::allocateResource, this, serviceName, *dataPtr, *ingressPtr, makespanNS);
 
     return;
   }
@@ -2122,7 +2137,7 @@ Forwarder::allocateResource(const std::string& serviceName, const Data& data, co
 
   // Schedule release
   //ns3::Simulator::Schedule(ns3::MilliSeconds(1), &Forwarder::freeResource, this, serviceName, data, ingress);
-  ns3::Simulator::Schedule(ns3::MilliSeconds(1), &Forwarder::freeResource, this, serviceName, *dataPtr, *ingressPtr); // TODO: this assumes all services take 1ms. Need to get the real service latency from somewhere.
+  ns3::Simulator::Schedule(ns3::NanoSeconds(makespanNS), &Forwarder::freeResource, this, serviceName, *dataPtr, *ingressPtr);
 }
 
 
