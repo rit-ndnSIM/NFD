@@ -76,7 +76,9 @@ Forwarder::Forwarder(FaceTable& faceTable)
   m_faceTable.afterAdd.connect([this] (const Face& face) {
     face.afterReceiveInterest.connect(
       [this, &face] (const Interest& interest, const EndpointId& endpointId) {
-        this->onIncomingInterest(interest, FaceEndpoint(const_cast<Face&>(face), endpointId));
+        //this->onIncomingInterest(interest, FaceEndpoint(const_cast<Face&>(face), endpointId));
+        this->processIncomingInterest(interest, FaceEndpoint(const_cast<Face&>(face), endpointId));
+        //this->processIncomingInterestMutex(interest, FaceEndpoint(const_cast<Face&>(face), endpointId));
       });
     face.afterReceiveData.connect(
       [this, &face] (const Data& data, const EndpointId& endpointId) {
@@ -103,6 +105,9 @@ Forwarder::Forwarder(FaceTable& faceTable)
   m_strategyChoice.setDefaultStrategy(getDefaultStrategyName());
 
   m_SDservTracker.clear();
+  //m_interestMutex.unlock();
+  //m_resourceMutex.unlock();
+  m_interestBusy = false;
   m_resourceBusy = false;
   auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
   NFD_LOG_INFO("NFD is running on node " << (*node).GetId());
@@ -202,6 +207,65 @@ m_SDservTracker = {
 
 
 */
+
+
+/*
+void
+Forwarder::processIncomingInterestMutex(const Interest& interest, const FaceEndpoint& ingress)
+{
+  auto interestPtr = std::make_shared<Interest>(interest);
+  auto ingressPtr = std::make_shared<FaceEndpoint>(ingress);
+
+  std::unique_lock<std::mutex> lock(m_interestMutex); // blocks here if another interest is currently processing
+  // mutex successfully locked here
+  // Schedule the release (after interest processing)
+  ns3::Simulator::Schedule(ns3::MilliSeconds(1), &Forwarder::doneProcessingIncomingInterestMutex, this, *interestPtr, *ingressPtr, m_interestMutex);
+
+  // Resource is busy processing another interest, retry later
+  //ns3::Simulator::Schedule(ns3::NanoSeconds(100), &Forwarder::processIncomingInterestMutex, this, *interestPtr, *ingressPtr);
+  //return;
+
+}
+void
+Forwarder::doneProcessingIncomingInterestMutex(const Interest& interest, const FaceEndpoint& ingress)
+{
+  auto interestPtr = std::make_shared<Interest>(interest);
+  auto ingressPtr = std::make_shared<FaceEndpoint>(ingress);
+
+  m_interestMutex.unlock();
+  Forwarder::onIncomingInterest(*interestPtr, *ingressPtr); // finish processing the incoming interest packet.
+}
+*/
+
+
+void
+Forwarder::processIncomingInterest(const Interest& interest, const FaceEndpoint& ingress)
+{
+  auto interestPtr = std::make_shared<Interest>(interest);
+  auto ingressPtr = std::make_shared<FaceEndpoint>(ingress);
+
+  if (m_interestBusy) {
+    // Resource is busy processing another interest, retry later
+    ns3::Simulator::Schedule(ns3::MicroSeconds(1), &Forwarder::processIncomingInterest, this, *interestPtr, *ingressPtr);
+    return;
+  }
+
+  // Acquire resource - if we comment out the following line, we will be adding in a delay for interest processing, but we would allow multiple interests to be processed at the same time.
+  m_interestBusy = true;
+
+  // Schedule the release (after interest processing)
+  ns3::Simulator::Schedule(ns3::MicroSeconds(200), &Forwarder::doneProcessingIncomingInterest, this, *interestPtr, *ingressPtr);
+}
+void
+Forwarder::doneProcessingIncomingInterest(const Interest& interest, const FaceEndpoint& ingress)
+{
+  auto interestPtr = std::make_shared<Interest>(interest);
+  auto ingressPtr = std::make_shared<FaceEndpoint>(ingress);
+
+  m_interestBusy = false;
+  Forwarder::onIncomingInterest(*interestPtr, *ingressPtr); // finish processing the incoming interest packet.
+}
+
 
 
 
@@ -1646,11 +1710,6 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     {
       if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) // only if data is coming from local face (if coming from local, it's from a service, and thus we need to report resource usage).
       {
-        //while (m_resourceBusy == true); // wait until no other service has the semaphore.
-        //m_resourceBusy = true;
-        //NFD_LOG_DEBUG("NFDServiceDiscovery - resourceAllocation: Service " << name1String << " started running. Setting resourceBusy = true.");
-        //ns3::Simulator::Schedule(ns3::Seconds(0.001), &Forwarder::freeResource, this, name1String); //schedule the release of the semaphore (this is how long it takes to run the service).
-
         //NFD_LOG_DEBUG("Now reading it into string...");
         std::string dataPacketString;
         dataPacketString = (const char *)data.getContent().value();
@@ -1663,14 +1722,6 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
         uint64_t makespanNS = 1000000;
         makespanNS = dataPacketContents["makespanNS"]; // we don't really do anything with the previous service's makespan here.
         Forwarder::allocateResource(name1String, data, ingress, makespanNS);
-
-        //while (m_resourceBusy == true); // wait until this service finishes.
-
-
-        //ns3::Simulator::Schedule(ns3::Seconds(0.001), &Forwarder::onIncomingDataAfterServiceRuns, this, dataCopy, ingressCopy); //schedule the data packet to finish being processed
-        //ns3::Simulator::Schedule(ns3::Seconds(0.001), ns3::MakeCallback(&Forwarder::onIncomingDataAfterServiceRuns, this), dataCopy, ingressCopy); //schedule the data packet to finish being processed
-        //ns3::Simulator::Schedule(ns3::Seconds(0.001), &Forwarder::onIncomingDataAfterServiceRuns, m_forwarder, data, ingress); //schedule the data packet to finish being processed
-
 
         return;
 
@@ -1925,10 +1976,6 @@ Forwarder::onIncomingDataAfterServiceRuns(const Data& data, const FaceEndpoint& 
 {
   NFD_LOG_DEBUG("onIncomingDataAfterServiceRuns in=" << ingress << " data=" << data.getName());
 
-  //NFD_LOG_DEBUG("onIncomingDataAfterServiceRuns waiting for semaphore");
-  //while (m_resourceBusy == true); // wait until no other service has the semaphore.
-  //NFD_LOG_DEBUG("onIncomingDataAfterServiceRuns done waiting for semaphore");
-
   // receive Data
   data.setTag(make_shared<lp::IncomingFaceIdTag>(ingress.face.getId()));
   ++m_counters.nInData;
@@ -2111,6 +2158,8 @@ Forwarder::onIncomingDataAfterServiceRuns(const Data& data, const FaceEndpoint& 
 
 
 
+
+
 void
 Forwarder::allocateResource(const std::string& serviceName, const Data& data, const FaceEndpoint& ingress, uint64_t makespanNS)
 {
@@ -2121,26 +2170,25 @@ Forwarder::allocateResource(const std::string& serviceName, const Data& data, co
   int64_t timeNowNS = timeNow.ToInteger(ns3::Time::NS); // Convert to integer
   auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
 
-  if (m_resourceBusy) {
+  if (!m_resourceBusy)
+  //if (m_resourceMutex.try_lock())
+  {
+    // mutex successfully locked here
+    m_resourceBusy = true; // Acquire resource
+    NFD_LOG_INFO("NFDServiceDiscovery - WFresourceAllocation: Service " << serviceName << " started running on node " << (*node).GetId() << ". Setting resourceBusy = true (resource locked at " << timeNowNS << " nanoseconds).");
+    // Schedule release
+    //ns3::Simulator::Schedule(ns3::MilliSeconds(1), &Forwarder::freeResource, this, serviceName, data, ingress);
+    ns3::Simulator::Schedule(ns3::NanoSeconds(makespanNS), &Forwarder::freeResource, this, serviceName, *dataPtr, *ingressPtr);
+  }
+  else
+  {
     // Resource is busy, retry later
-
     NFD_LOG_DEBUG("NFDServiceDiscovery - WFresourceAllocation: Service " << serviceName << " needs to start running on node " << (*node).GetId() << " but the node is busy running another service. Waiting 0.1ms and trying again. Current time: " << timeNowNS << " nanoseconds).");
     //ns3::Simulator::Schedule(ns3::MilliSeconds(0.1), &Forwarder::allocateResource, this, serviceName, data, ingress);
     ns3::Simulator::Schedule(ns3::MicroSeconds(100), &Forwarder::allocateResource, this, serviceName, *dataPtr, *ingressPtr, makespanNS);
-
     return;
   }
-
-  // Acquire resource
-  m_resourceBusy = true;
-  NFD_LOG_INFO("NFDServiceDiscovery - WFresourceAllocation: Service " << serviceName << " started running on node " << (*node).GetId() << ". Setting resourceBusy = true (resource locked at " << timeNowNS << " nanoseconds).");
-
-  // Schedule release
-  //ns3::Simulator::Schedule(ns3::MilliSeconds(1), &Forwarder::freeResource, this, serviceName, data, ingress);
-  ns3::Simulator::Schedule(ns3::NanoSeconds(makespanNS), &Forwarder::freeResource, this, serviceName, *dataPtr, *ingressPtr);
 }
-
-
 
 void
 Forwarder::freeResource(const std::string& serviceName, const Data& data, const FaceEndpoint& ingress)
@@ -2149,6 +2197,8 @@ Forwarder::freeResource(const std::string& serviceName, const Data& data, const 
   auto ingressPtr = std::make_shared<FaceEndpoint>(ingress);
 
   m_resourceBusy = false;
+  //m_resourceMutex.unlock();
+
   ns3::Time timeNow = ns3::Simulator::Now();
   int64_t timeNowNS = timeNow.ToInteger(ns3::Time::NS); // Convert to integer
   auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());

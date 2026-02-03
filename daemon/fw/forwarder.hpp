@@ -39,6 +39,7 @@
 #include "table/dead-nonce-list.hpp"
 #include "table/network-region-table.hpp"
 #include <ndn-cxx/security/key-chain.hpp>
+#include <mutex>
 
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
@@ -155,6 +156,16 @@ public:
 
   void
   freeResource(const std::string& serviceName, const Data& data, const FaceEndpoint& ingress);
+
+  void
+  processIncomingInterestMutex(const Interest& interest, const FaceEndpoint& ingress);
+  void
+  doneProcessingIncomingInterestMutex(const Interest& interest, const FaceEndpoint& ingress);
+
+  void
+  processIncomingInterest(const Interest& interest, const FaceEndpoint& ingress);
+  void
+  doneProcessingIncomingInterest(const Interest& interest, const FaceEndpoint& ingress);
 
 
 public:
@@ -317,7 +328,10 @@ private:
   NetworkRegionTable m_networkRegionTable;
   shared_ptr<Face>   m_csFace;
   json m_SDservTracker; // with this data structure, we can keep track of WHICH SD data packets have arrived, the faces (downstream and upstream), the EFT, upstream link delay, as well as service scheduling.
-  bool m_resourceBusy;
+  std::mutex m_interestMutex;  // mutex to account for interest processing (can only process one interest at a time)
+  bool m_interestBusy;  // mutex to account for interest processing (can only process one interest at a time)
+  std::mutex  m_resourceMutex;  // mutex to account for service execution in the node (CPU usage - only run one service at a time)
+  bool m_resourceBusy;  // mutex to account for service execution in the node (CPU usage - only run one service at a time)
 
   // allow Strategy (base class) to enter pipelines
   friend class fw::Strategy;
