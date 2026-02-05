@@ -843,6 +843,132 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
 
 }
 
+/*
+std::string
+Forwarder::PruneDagWorkflow(const std::string& interestName, std::string dagString)
+{
+
+  auto dagObject = json::parse(dagString);
+
+  // we PRUNE the DAG workflow to not include anything further downstream than this service
+
+  // start by removing the head service received from downstream
+  //std::cout << "DAG before erasing head: " << std::setw(2) << dagObject << '\n';
+  dagObject["dag"].erase((std::string)dagObject["head"]);
+  //std::cout << "DAG after erasing head: " << std::setw(2) << dagObject << '\n';
+
+  char prunedLastIteration = 1;
+  while (prunedLastIteration > 0)
+  {
+    prunedLastIteration = 0;
+
+    //std::cout << "\n\n\n\nNew main iteration, looking for sink nodes in the following dag: " << std::setw(2) << dagObject << '\n';
+
+
+    //find Sink Nodes
+    std::list <std::string> listOfServicesWithInputs;   // keeps track of which services have inputs
+    std::list <std::string> listOfRootServices;         // keeps track of which services don't have any inputs
+    std::list <std::string> listOfSinkNodes;            // keeps track of which node doesn't have an output (usually this is just the consumer)
+    for (auto& x : dagObject["dag"].items())
+    {
+      listOfRootServices.push_back(x.key()); // for now, add ALL keys to the list, we'll remove non-root ones later
+      for (auto& y : dagObject["dag"][x.key()].items())
+      {
+        listOfServicesWithInputs.push_back(y.key()); // add all values to the list
+        if ((std::find(listOfSinkNodes.begin(), listOfSinkNodes.end(), y.key()) == listOfSinkNodes.end())) // if y.key() does not exist in listOfSinkNodes
+        {
+          listOfSinkNodes.push_back(y.key()); // for now, add ALL values to the list, we'll remove non-sinks later
+        }
+      }
+    }
+    //std::cout << "removing services that feed into other services" << '\n';
+    // now remove services that feed into other services from the list of sink nodes
+    for (auto& x : dagObject["dag"].items())
+    {
+      if (!(std::find(listOfSinkNodes.begin(), listOfSinkNodes.end(), x.key()) == listOfSinkNodes.end())) // if x.key() exists in listOfSinkNodes
+      {
+        listOfSinkNodes.remove(x.key());
+      }
+    }
+    //std::cout << "done finding sink nodes. Num found: " << std::to_string(listOfSinkNodes.size()) << '\n';
+
+
+    // for each sink node found
+    for (auto sinkNode : listOfSinkNodes) // for (each sink node)
+    {
+      //std::cout << "  Comparing sinkNode: " << sinkNode << " with interestName: " << interestName << '\n';
+      //std::cout << "  prunedLastIteration = " << std::to_string(prunedLastIteration) << '\n';
+      if (sinkNode != interestName) //this service name must include the "version", ex: "/service2/B"
+      {
+        // prune sink Node
+        //std::cout << "ServiceDiscovery prunning current sink node: " << sinkNode << '\n';
+        dagObject["dag"].erase(sinkNode);
+
+        // now that the sink node has been pruned, remove it from all feeds from key services. Key services that end up as new sinks will be removed in next iteration.
+        for (auto& x : dagObject["dag"].items())
+        {
+          char prunedLastIterationY = 1;
+          while (prunedLastIterationY > 0) // since we have iteration loops that deal with key/value pairs, we can only prune one at a time. If more than one prunning is necessary, we need to re-iterate
+          {
+            for (auto& y : dagObject["dag"][x.key()].items())
+            {
+              prunedLastIterationY = 0;
+              if (y.key() == sinkNode)
+              {
+                //std::cout << "   prunning sink node feed, key: " << x.key() << ", feed: " << y.key() << '\n';
+                dagObject["dag"][x.key()].erase(y.key());
+                //std::cout << "   after prunning feed: " << std::setw(2) << dagObject << '\n';
+                prunedLastIterationY++;
+                break;
+              }
+            }
+            if (dagObject["dag"][x.key()].size() == 0)
+              break;
+          }
+        }
+
+        prunedLastIteration++;
+        break;
+      }
+    }
+
+    // now prune any keys that are left with no values
+    char prunedLastIterationX = 1;
+    while (prunedLastIterationX > 0) // since we have iteration loops that deal with key/value pairs, we can only prune one at a time. If more than one prunning is necessary, we need to re-iterate
+    {
+      prunedLastIterationX = 0;
+      for (auto& x : dagObject["dag"].items())
+      {
+        if (dagObject["dag"][x.key()].size() == 0)
+        {
+          // x doesn't have any more feeds, we can prune it.
+          //std::cout << "   no feeds left, prunning key: " << x.key() << '\n';
+          dagObject["dag"].erase(x.key());
+          //std::cout << "   after prunning key: " << std::setw(2) << dagObject << '\n';
+          prunedLastIterationX++;
+          break;
+        }
+      }
+    }
+
+  }
+
+  // DAG now contains current interest service as the only sink
+
+  // Now prune this service (upstream DAG should not contain this service as a source - but leave where it appears as a feed!)
+  dagObject["dag"].erase(interestName);
+  //std::cout << "All keys pruned: " << std::setw(2) << dagObject << '\n';
+
+
+  dagObject["head"] = interestName;
+
+  std::string updatedDagString = dagObject.dump();
+
+  return updatedDagString;
+}
+*/
+
+
 void
 Forwarder::sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint& ingress,
                               const shared_ptr<pit::Entry>& pitEntry)
@@ -861,8 +987,11 @@ Forwarder::sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint
   {
     for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it) {
       Face* localFace = &*it;
-      if (localFace->getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL) {
+      if (localFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL) {
         NFD_LOG_DEBUG("cabeee CABEEEshortcutOPT, generating interest " << interestOPT << ", for local face " << localFace);
+        // TODO: must iterate through all hosted services
+        // TODO: must check if incoming interest is nescoSCOPT, and that hosted service name is not the same as incoming interest head
+        // i.e., only generate shorcutOPT interest if the incoming interest is for /nescoSCOPT, and this fib entry is not for the service the interest is for (in which case the interest is forwarded to the service normally later on) 
         localFace->sendInterest(*interestOPT);
       }
     }
@@ -872,7 +1001,40 @@ Forwarder::sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint
   {
     //NFD_LOG_DEBUG("CABEEEshortcutOPT, sending /shortcutOPT interest to apps on local faces to generate new interests for inputs into locally hosted services.");
 
-    //look at FIB, and see if any services are hosted on a local face. If so, send interestOPT out through that face.
+
+
+/*
+    // PRINT FIB ENTRIES
+    for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+    {
+      auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+      //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
+      ndn::Name entryName;
+      entryName = fib_iterator->getPrefix();
+      entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
+      std::string entryString = entryName.toUri();
+
+      ndn::Name serviceName;
+      serviceName = fib_iterator->getPrefix();
+      serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
+      std::string serviceString = serviceName.toUri();
+      NFD_LOG_DEBUG((*node).GetId() << " <--nodeID. CABEEEshortcutOPT, fib entry name is "<< entryString << serviceString);
+
+        if (fib_iterator->hasNextHops())
+        {
+          // figure out the faceID of all the nexthops in the list, and send interest to ones that are local
+          const fib::NextHopList& hopList = fib_iterator->getNextHops();
+          for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+          {
+            NFD_LOG_DEBUG("     CABEEEshortcutOPT, looking at all hops for this fib entry, hop_iterator: " << hop_iterator->getFace().getId());
+          }
+        }
+    }
+*/
+
+
+    // look at FIB, and see if any UPSTREAM services are hosted on a local face (upstream only, since we received a pruned dag, so upstream is all we know about).
+    // If so, send interestOPT out through that face.
     for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
     {
       //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
@@ -892,9 +1054,22 @@ Forwarder::sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint
       //NFD_LOG_DEBUG("CABEEEshortcutOPT, fib entry name component 1 is "<< serviceString);
       //NFD_LOG_DEBUG("CABEEEshortcutOPT, interest head is "<< dagObject["head"]);
 
-      // only generate shorcutOPT interest if the incoming interest is for /nescoSCOPT, and this fib entry is not for the service the interest is for (in which case the interest is forwarded to the service normally later on) 
-      if (entryString == "/nescoSCOPT" && serviceString != dagObject["head"])
+
+
+//std::string prunedDagString;
+//prunedDagString = this->PruneDagWorkflow(serviceString, dagString);
+//json prunedDagObject = json::parse(prunedDagString);
+//std::cout << "CABEEEshortcutOPT, prunedDagString is: " << prunedDagString << std::endl;
+
+
+      // only generate shorcutOPT interest if the incoming interest is for /nescoSCOPT, and this fib entry is not for the service the interest is for (in which case the interest is forwarded to the service normally later on), and the service we'd be generating an interest for is upstream in the pruned DAG we received. Hosted services from other branches are not dealt with in shortcutOPT.
+      //if (entryString == "/nescoSCOPT" && serviceString != dagObject["head"])
+      //if (entryString == "/nescoSCOPT" && serviceString != dagObject["head"] && prunedDagObject["dag"].contains(serviceString))
+      if (entryString == "/nescoSCOPT" && serviceString != dagObject["head"] && dagObject["dag"].contains(serviceString))
       {
+//auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+//NFD_LOG_DEBUG("NodeID is " << (*node).GetId());
+//std::cout << (*node).GetId() << " <--nodeiD : CABEEEshortcutOPT, we have /nescoSCOPT and serviceString " << serviceString << " is not the same as dag head " << dagObject["head"] << std::endl;
         //NFD_LOG_DEBUG("CABEEEshortcutOPT, fib entry has nescoSCOPT name\n");
         if (fib_iterator->hasNextHops())
         {
@@ -905,25 +1080,32 @@ Forwarder::sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint
           for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
           //for (nfd::fib::NextHopList::const_iterator hop_iterator = fib_iterator->getNextHops().begin(); hop_iterator != fib_iterator->getNextHops().end(); ++hop_iterator)
           {
-            //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at all hops for this fib entry\n");
+            //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at all hops for this fib entry, hop_iterator: " << hop_iterator->getFace().getId());
             //Face thisFace = hop_iterator->getFace();
             //if (thisFace.getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL)
             //{
               //thisFace.sendInterest(interestOPT);
             //}
-            if (hop_iterator->getFace().getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL)
+            if (hop_iterator->getFace().getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
             {
               //interestOPT->setName(fib_iterator->getPrefix()); // give it the hosted service name, instead of /nescoSCOPT/shortcutOPT
               ndn::Name scoptFullName;
               scoptFullName = "/nescoSCOPT/shortcutOPT" + fib_iterator->getPrefix().getSubName(1,1).toUri();
               interestOPT->setName(scoptFullName); // add the hosted service name to the full name: /nescoSCOPT/shortcutOPT/<serviceName>
               NFD_LOG_DEBUG("CABEEEshortcutOPT, generating interest " << interestOPT->getName().toUri() << ", for local face with faceID: " << hop_iterator->getFace().getId());
+//std::cout << "CABEEEshortcutOPT, generating interest " << interestOPT->getName().toUri() << ", for local face with faceID: " << hop_iterator->getFace().getId() << std::endl;
+
+
+              //TODO: rather than just sending the interest out, rank it and add it to a queue.
               hop_iterator->getFace().sendInterest(*interestOPT);
             }
           }
         }
       }
     }
+
+    // TODO: pick a threshold for how many shortcutOPT interests we are willing to send out
+    // TODO: iterate through queue, and send out the best ranked ones
   }
 }
 

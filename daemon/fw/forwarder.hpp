@@ -299,6 +299,11 @@ private:
   void
   scheduleCompaction(void);
 
+/*
+  std::string
+  PruneDagWorkflow(const std::string& interestName, std::string);
+*/
+
 NFD_PUBLIC_WITH_TESTS_ELSE_PRIVATE:
   /**
    * \brief Configuration options from "forwarder" section
