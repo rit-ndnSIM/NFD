@@ -357,7 +357,7 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
     else
     {
 
-/*
+
 auto dagParameterFromInterest = interest.getApplicationParameters();
 std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
 //NFD_LOG_INFO("NFDServiceDiscovery, FIB entry future WF name&hash is " << interest.getName());
@@ -408,7 +408,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
   }
 
 }
-*/
+
 
       if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
       {
@@ -2107,6 +2107,7 @@ m_FibOwnerTracker = {
         // this is because the recorded face with lowest EFT is for the serviceDiscovery service's face, not the actual workflow service's face. Each application gets its own local face.
       if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
       {
+        NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is local. Going to try to delete FIB entry if it has no owner. This is for WF name " << futureWFnameAndHashString);
         // if there is an existing FIB entry for this name&pDAG, remove it. We need to forward to this local face using regular FIB entry with just service name and cost 0.
 
         //TODO: we can't just delete the entry if it exists. We may have several "active" requests with unique paths. Only the current path that this data packet was for has finished being analyzed.
@@ -2114,19 +2115,55 @@ m_FibOwnerTracker = {
         //      Look into perhaps keeping a local custom fib where we can store the rxedDataNameAndHash too. If we no longer need the fib entry (cuz it's not optimal), we can then check and see if there
         //      are still other fib entries for this futureWFnameAndHash on that same face, and if there are, we don't remove the actual FIB entry. We only remove it once there are no more entries in the custom FIB for that particular face.
 
+
+ // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
+  if (futureWFnameAndHashString == "/nesco/service1/params-sha256=b11a48b8384e652ea726efb193902553c97041a52670bb25b5f2c19bb15a8af3")
+  {
+    for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+    {
+      //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
+      ndn::Name entryName;
+      entryName = fib_iterator->getPrefix();
+      entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
+      std::string entryString = entryName.toUri();
+
+      ndn::Name serviceName;
+      serviceName = fib_iterator->getPrefix();
+      serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
+      std::string serviceString = serviceName.toUri();
+
+      if (entryString == "/nesco")
+      {
+        if (fib_iterator->hasNextHops())
+        {
+          // figure out the faceID of all the nexthops in the list, and print them
+          const fib::NextHopList& hopList = fib_iterator->getNextHops();
+          for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+          {
+            NFD_LOG_INFO("CABEEEfibEntries: name " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
+          }
+        }
+      }
+    }
+  }
+
+
         // make value of this specific rxedDataNameAndHash = 0
         m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash] = 0;
 
+        NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_FibOwnerTracker data structure: " << std::setw(2) << m_FibOwnerTracker << '\n');
         // check if any other values for this futureWFnameAndHash is still a 1. If none, then remove real FIB entry
         bool has_active_owner = false;
-        for (auto& [service, entries] : m_FibOwnerTracker.items()) {
-            for (auto& [key, value] : entries.items()) {
-                if (value == 1) {
-                    has_active_owner = true;
-                    break; 
-                }
+        if (m_FibOwnerTracker.contains(futureWFnameAndHashString))
+        {
+          for (auto& [service, value] : m_FibOwnerTracker[futureWFnameAndHashString].items())
+          {
+            if (value == 1) {
+              has_active_owner = true;
+              NFD_LOG_DEBUG("NFDServiceDiscovery, FIB entry has active owner (not deleting entry)");
+              break; 
             }
-            if (has_active_owner) break;
+          }
         }
 
         if (has_active_owner == false)
@@ -2141,9 +2178,11 @@ m_FibOwnerTracker = {
           }
         }
       }
+
       // otherwise, if it is a non-local face, we would be going out to another NFD node, and thus we create a new FIB entry with that non-local face.
       if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
       {
+        NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is NOT local. Going to try to add FIB entry.");
         fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
         m_fib.addOrUpdateNextHop(*entry, *lowestCostFace, lowestEFT);
         // make value of this specific rxedDataNameAndHash = 1. Create if doesn't exist? Make all other entries = 0?
