@@ -357,7 +357,7 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
     else
     {
 
-
+/*
 auto dagParameterFromInterest = interest.getApplicationParameters();
 std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
 //NFD_LOG_INFO("NFDServiceDiscovery, FIB entry future WF name&hash is " << interest.getName());
@@ -408,6 +408,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
   }
 
 }
+*/
 
 
       if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
@@ -2115,38 +2116,38 @@ m_FibOwnerTracker = {
         //      Look into perhaps keeping a local custom fib where we can store the rxedDataNameAndHash too. If we no longer need the fib entry (cuz it's not optimal), we can then check and see if there
         //      are still other fib entries for this futureWFnameAndHash on that same face, and if there are, we don't remove the actual FIB entry. We only remove it once there are no more entries in the custom FIB for that particular face.
 
-
+/*
  // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
-  if (futureWFnameAndHashString == "/nesco/service1/params-sha256=b11a48b8384e652ea726efb193902553c97041a52670bb25b5f2c19bb15a8af3")
+if (futureWFnameAndHashString == "/nesco/service1/params-sha256=b11a48b8384e652ea726efb193902553c97041a52670bb25b5f2c19bb15a8af3")
+{
+  for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
   {
-    for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+    //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
+    ndn::Name entryName;
+    entryName = fib_iterator->getPrefix();
+    entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
+    std::string entryString = entryName.toUri();
+
+    ndn::Name serviceName;
+    serviceName = fib_iterator->getPrefix();
+    serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
+    std::string serviceString = serviceName.toUri();
+
+    if (entryString == "/nesco")
     {
-      //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
-      ndn::Name entryName;
-      entryName = fib_iterator->getPrefix();
-      entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
-      std::string entryString = entryName.toUri();
-
-      ndn::Name serviceName;
-      serviceName = fib_iterator->getPrefix();
-      serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
-      std::string serviceString = serviceName.toUri();
-
-      if (entryString == "/nesco")
+      if (fib_iterator->hasNextHops())
       {
-        if (fib_iterator->hasNextHops())
+        // figure out the faceID of all the nexthops in the list, and print them
+        const fib::NextHopList& hopList = fib_iterator->getNextHops();
+        for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
         {
-          // figure out the faceID of all the nexthops in the list, and print them
-          const fib::NextHopList& hopList = fib_iterator->getNextHops();
-          for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
-          {
-            NFD_LOG_INFO("CABEEEfibEntries: name " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
-          }
+          NFD_LOG_INFO("CABEEEfibEntries: name " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
         }
       }
     }
   }
-
+}
+*/
 
         // make value of this specific rxedDataNameAndHash = 0
         m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash] = 0;
