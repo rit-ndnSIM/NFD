@@ -40,6 +40,8 @@
 #include "table/network-region-table.hpp"
 #include <ndn-cxx/security/key-chain.hpp>
 #include <mutex>
+#include <queue>
+#include <memory>
 
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
@@ -302,6 +304,21 @@ private:
   void
   scheduleCompaction(void);
 
+
+  void
+  processNextRequest(void); // private helper to process the next item in the queue
+
+  struct ResourceRequest {
+        std::string serviceName;
+        std::shared_ptr<ndn::Data> dataPtr;
+        std::shared_ptr<nfd::FaceEndpoint> ingressPtr;
+        uint64_t makespanNS;
+    };
+
+
+
+
+
 /*
   std::string
   PruneDagWorkflow(const std::string& interestName, std::string);
@@ -341,6 +358,8 @@ private:
   bool m_interestBusy;  // mutex to account for interest processing (can only process one interest at a time)
   std::mutex  m_resourceMutex;  // mutex to account for service execution in the node (CPU usage - only run one service at a time)
   bool m_resourceBusy;  // mutex to account for service execution in the node (CPU usage - only run one service at a time)
+  uint64_t m_resourceBusyTime; // this keeps track of how many NS the CPU will be busy for. When a service is added to the queue, its makespan is added to this variable. When a service is completed, its makspan is subtracted.
+  std::queue<ResourceRequest> m_resourceQueue;
 
   // allow Strategy (base class) to enter pipelines
   friend class fw::Strategy;
