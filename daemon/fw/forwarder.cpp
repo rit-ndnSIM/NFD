@@ -129,6 +129,7 @@ m_SDservTracker = {
           "inID": faceID1,                            // faceID where an interest for this service/pDAG has been received.
           "inName": "/service1/SDpDAG_param_hash",    // Notice we store the original name as received so we can respond with the same name when data arrives.
           "serviceDiscovery": <0 or 1>,               // We add the setting for service discovery: 0 - disabled, 1 - enabled
+          "resourceUtilization": <0 or 1>,            // We add the setting for resource utilization: 0 - disabled, 1 - enabled
           "resourceAllocation": <0 or 1>,             // We add the setting for resource allocation: 0 - disabled, 1 - enabled
           "allocationReuse": <0 or 1>,                // We add the setting for allocation reuse of previous slots: 0 - disabled, 1 - enabled
           "scheduleCompaction": <0 or 1>,             // We add the setting for schedule compaction: 0 - disabled, 1 - enabled
@@ -166,6 +167,7 @@ m_SDservTracker = {
           "inID": faceID1,                            // faceID where an interest for this service/pDAG has been received.
           "inName": "/service1/SDpDAG_param_hash",    // Notice we store the original name as received so we can respond with the same name when data arrives.
           "serviceDiscovery": <0 or 1>,               // We add the setting for service discovery: 0 - disabled, 1 - enabled
+          "resourceUtilization": <0 or 1>,            // We add the setting for resource utilization: 0 - disabled, 1 - enabled
           "resourceAllocation": <0 or 1>,             // We add the setting for resource allocation: 0 - disabled, 1 - enabled
           "allocationReuse": <0 or 1>,                // We add the setting for allocation reuse of previous slots: 0 - disabled, 1 - enabled
           "scheduleCompaction": <0 or 1>,             // We add the setting for schedule compaction: 0 - disabled, 1 - enabled
@@ -593,6 +595,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
       m_SDservTracker[jsonName]["faceIN"]["dag"] = dagObject["dag"];              // we capture the pDag here so that we can use it to generate the name we use for the FIB entry  we create later.
       m_SDservTracker[jsonName]["faceIN"]["head"] = dagObject["head"];            // we capture the "head" here so that we can use it to generate the name&hash we use for the FIB entry  we create later.
       m_SDservTracker[jsonName]["faceIN"]["serviceDiscovery"] = dagObject["serviceDiscovery"];  // we capture the setting here so that we know if we'll need to perform this later
+      m_SDservTracker[jsonName]["faceIN"]["resourceUtilization"] = dagObject["resourceUtilization"];  // we capture the setting here so that we know if we'll need to perform this later
       m_SDservTracker[jsonName]["faceIN"]["resourceAllocation"] = dagObject["resourceAllocation"];  // we capture the setting here so that we know if we'll need to perform this later
       m_SDservTracker[jsonName]["faceIN"]["allocationReuse"] = dagObject["allocationReuse"];  // we capture the setting here so that we know if we'll need to perform this later
       m_SDservTracker[jsonName]["faceIN"]["scheduleCompaction"] = dagObject["scheduleCompaction"];  // we capture the setting here so that we know if we'll need to perform this later
@@ -1791,14 +1794,17 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
           if (name1String == "/serviceDiscovery2")
           {
             uint64_t totalQueueMakespanNS = 0;
-            // Create a copy so we don't destroy the original queue
-            std::queue<ResourceRequest> tempQueue = m_resourceQueue;
-            while (!tempQueue.empty())
+            if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceUtilization"] == 1) // if the flag is set, then we consider the resource utilization to calculate EFT. Otherwise, assumes node is fully available for computation at all times.
             {
-                totalQueueMakespanNS += tempQueue.front().makespanNS;
-                tempQueue.pop(); // Remove from the temporary copy
+              // Create a copy so we don't destroy the original queue
+              std::queue<ResourceRequest> tempQueue = m_resourceQueue;
+              while (!tempQueue.empty())
+              {
+                  totalQueueMakespanNS += tempQueue.front().makespanNS;
+                  tempQueue.pop(); // Remove from the temporary copy
+              }
+              NFD_LOG_INFO("Total makespan of all waiting services in the queue (size = " << m_resourceQueue.size() << "): " << totalQueueMakespanNS << " ns.");
             }
-            NFD_LOG_INFO("Total makespan of all waiting services in the queue (size = " << m_resourceQueue.size() << "): " << totalQueueMakespanNS << " ns.");
 
             lowestEFT += serviceLatency + totalQueueMakespanNS; // take into account the current CPU queue (utilization). Assumes when WF request comes in, CPU still has same utilization.
           }
