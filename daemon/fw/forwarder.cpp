@@ -128,6 +128,7 @@ m_SDservTracker = {
       "faceIN": {
           "inID": faceID1,                            // faceID where an interest for this service/pDAG has been received.
           "inName": "/service1/SDpDAG_param_hash",    // Notice we store the original name as received so we can respond with the same name when data arrives.
+          "WFnameAndHash": "/service1/WFpDAG_param_hash",             // WFnameAndHash name could match with other ones below
           "serviceDiscovery": <0 or 1>,               // We add the setting for service discovery: 0 - disabled, 1 - enabled
           "resourceUtilization": <0 or 1>,            // We add the setting for resource utilization: 0 - disabled, 1 - enabled
           "resourceAllocation": <0 or 1>,             // We add the setting for resource allocation: 0 - disabled, 1 - enabled
@@ -166,6 +167,7 @@ m_SDservTracker = {
       "faceIN": {
           "inID": faceID1,                            // faceID where an interest for this service/pDAG has been received.
           "inName": "/service1/SDpDAG_param_hash",    // Notice we store the original name as received so we can respond with the same name when data arrives.
+          "WFnameAndHash": "/service1/WFpDAG_param_hash",             // WFnameAndHash name could match with other ones below
           "serviceDiscovery": <0 or 1>,               // We add the setting for service discovery: 0 - disabled, 1 - enabled
           "resourceUtilization": <0 or 1>,            // We add the setting for resource utilization: 0 - disabled, 1 - enabled
           "resourceAllocation": <0 or 1>,             // We add the setting for resource allocation: 0 - disabled, 1 - enabled
@@ -210,7 +212,7 @@ m_SDservTracker = {
 // We can't just delete the FIB entry if it exists because we may have several "active" requests with unique paths. Only the current path that a received data packet was for has finished being analyzed. Other paths may still be optimal,
 //   but since they all share the same full WF name - /serviceX/WFpDAG_param_hash (futureWFnameAndHash) for each face, removing this one would remove the other one(s) for that face too.
 
-m_FibOwnerTracker = {
+old m_FibOwnerTracker = {
     "/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
         "fibEntryExists": 0/1,                              // if any of the faceIDs below claim a fibOwner, this value will be 1, otherwise 0. Represents the actual FIB entry existing or not.
         "/service1/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
@@ -247,7 +249,7 @@ m_FibOwnerTracker = {
     }
 }
 
-m_FibOwnerTracker = {
+old m_FibOwnerTracker = {
     "/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
         "/service1/faceInIdString1&pDAG_param_hash": 0,     // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
                                                                 // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
@@ -268,6 +270,41 @@ m_FibOwnerTracker = {
 }
 
 
+
+m_FibOwnerTracker = {
+    "/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
+        "/service1/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+            "eft": 6,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+            "faceID": "260",                                    // faceID of the face where this EFT can be achieved
+            "faceType": "local"                               // local or non-local
+        }
+        "/service1/faceInIdString2&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+            "eft": 7,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+            "faceID": "262",                                    // faceID of the face where this EFT can be achieved
+            "faceType": "non-local"                           // local or non-local
+        }
+        "/service1/faceInIdString3&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+            "eft": 9,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+            "faceID": "258",                                    // faceID of the face where this EFT can be achieved
+            "faceType": "non-local"                           // local or non-local
+        }
+    },
+    "/service2/WFpDAG_param_hash": {                        // key has full name service/pDAG
+        "/service2/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+            "eft": 4,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+            "faceID": "260",                                    // faceID of the face where this EFT can be achieved
+            "faceType": "local"                               // local or non-local
+        }
+        "/service2/faceInIdString2&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+            "eft": 3,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+            "faceID": "258",                                    // faceID of the face where this EFT can be achieved
+            "faceType": "non-local"                           // local or non-local
+        }
+    },
+    "/service3/WFpDAG_param_hash": {                        // key has full name service/pDAG
+        etc...
+    }
+}
 
 
 
@@ -337,14 +374,15 @@ Forwarder::doneProcessingIncomingInterest(const Interest& interest, const FaceEn
 void
 Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingress)
 {
-  ndn::Name simpleName;
-  simpleName = (interest.getName()).getPrefix(1); // get just the first component of the name, and convert to Uri string
-  std::string simpleStringName = simpleName.toUri();
+  ndn::Name prefixName;
+  prefixName = (interest.getName()).getPrefix(1); // get just the first component of the name (the prefix), and convert to Uri string
+  std::string prefixNameString = prefixName.toUri();
 
 
   // get first part of the name, if it equals /nesco or /nescoscopt or /orchA or /orchB and it's coming from a local face (our application), then print INFO message
   // this effectively counts the number of interest packets that are generated at the consumer (including the custom forwarders)
-  if (simpleStringName == "/nesco" || simpleStringName == "/nescoSCOPT" || simpleStringName == "/orchA" || simpleStringName == "/orchB")
+  if (prefixNameString == "/nesco" || prefixNameString == "/nescoSCOPT" || prefixNameString == "/orchA" || prefixNameString == "/orchB" ||
+      prefixNameString == "/icnfc" || prefixNameString == "/ndnfcp" || prefixNameString == "/or3")
   {
     if (interest.getName().getPrefix(-1).getSubName(1,1).toUri() == "/serviceDiscovery" ||
         interest.getName().getPrefix(-1).getSubName(1,1).toUri() == "/serviceDiscovery2" ||
@@ -377,7 +415,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 //NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Interest): " << std::setw(2) << m_SDservTracker << '\n');
 
   // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
-  if (simpleStringName == "/nesco")
+  if (prefixNameString == "/nesco")
   {
     for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
     {
@@ -517,7 +555,11 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
       }
     }
     return;
-  } // else
+
+
+
+
+  } // else, not a schedulerRelease interest
 
 
 
@@ -585,6 +627,43 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     int64_t SDstartTimeNS = dagObject["serviceDiscoveryStartTimeNS"];
 
 
+
+
+
+
+    // create name&pDAG just like it will be created by the regular consumer when the real workflow runs. The application parameters are different (less of them), so the hash will be different.
+    ndn::Name futureWFnameAndHash;
+    futureWFnameAndHash = (interest.getName()).getPrefix(-1); // remove the last component of the name (the parameter digest) so we have just the raw name
+    futureWFnameAndHash = futureWFnameAndHash.getSubName(2,1); // remove the zeroeth component of the name (/nesco), and the first component of the name (/serviceDiscovery). starting at component 2, keep 1 component
+    //std::string futureWFnameAndHashString = "/nesco" + futureWFnameAndHash.toUri();
+    std::string futureWFnameAndHashString = prefixNameString + futureWFnameAndHash.toUri();
+
+    json WFdagObject;
+    WFdagObject["dag"]  = dagObject["dag"];
+    WFdagObject["head"] = dagObject["head"];
+    std::string WFupdatedDagString = WFdagObject.dump();
+    // in order to convert from std::string to a char[] datatype we do the following (https://stackoverflow.com/questions/7352099/stdstring-to-char):
+    char *WFdagStringParameter = new char[WFupdatedDagString.length() + 1];
+    strcpy(WFdagStringParameter, WFupdatedDagString.c_str());
+    size_t lengthParam = strlen(WFdagStringParameter);
+
+    shared_ptr<Interest> dummyInterest = make_shared<Interest>();
+    dummyInterest->setName(futureWFnameAndHashString);
+    dummyInterest->setApplicationParameters((const uint8_t *)WFdagStringParameter, lengthParam);
+    futureWFnameAndHash = dummyInterest->getName();
+    futureWFnameAndHashString = futureWFnameAndHash.toUri();
+
+    // TODO: package code above into separate function as shown below.
+
+    //futureWFnameAndHash = generateWFnameAndHash(const Name& SDname, std::string dag, std::string head);
+    //futureWFnameAndHashString = futureWFnameAndHash.toUri();
+
+
+
+
+
+
+
     // if faceIN ID in this name entry doesn't exist, create it so that we know to send data packets out through it later
     //if (!m_SDservTracker[jsonName]["faceIN"].contains(faceInIdString))
     if (!m_SDservTracker.contains(jsonName))
@@ -592,6 +671,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
       //NFD_LOG_DEBUG("NFDServiceDiscovery adding this name to faceIN list: " << jsonName << " - faceID is: " << faceInIdString);
       m_SDservTracker[jsonName]["faceIN"]["inID"] = faceInId;                     // we record the faceID
       m_SDservTracker[jsonName]["faceIN"]["inName"] = interest.getName().toUri(); // we record the original name as it came in, so we know what name to use when we respond with data downstream.
+      m_SDservTracker[jsonName]["faceIN"]["WFnameAndHash"] = futureWFnameAndHashString;
       m_SDservTracker[jsonName]["faceIN"]["dag"] = dagObject["dag"];              // we capture the pDag here so that we can use it to generate the name we use for the FIB entry  we create later.
       m_SDservTracker[jsonName]["faceIN"]["head"] = dagObject["head"];            // we capture the "head" here so that we can use it to generate the name&hash we use for the FIB entry  we create later.
       m_SDservTracker[jsonName]["faceIN"]["serviceDiscovery"] = dagObject["serviceDiscovery"];  // we capture the setting here so that we know if we'll need to perform this later
@@ -601,9 +681,36 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
       m_SDservTracker[jsonName]["faceIN"]["scheduleCompaction"] = dagObject["scheduleCompaction"];  // we capture the setting here so that we know if we'll need to perform this later
       m_SDservTracker[jsonName]["faceIN"]["WFinterestRxedTime"] = timeNowNS + WFstartTimeNS - SDstartTimeNS;  // we capture the "WFinterestRxedTime" here so that we can use it for allocation slot reuse calculations later.
     }
-    //if (!m_SDservTracker[jsonName].contains("faceOUT"))
-    //{
-    //}
+    else // name already existed (this isn't the first interest)
+    {
+      if (prefixNameString == "or3")
+      {
+        NFD_LOG_DEBUG("NFDServiceDiscovery, OR^3 subsequent interest packet received for name " << jsonName << ". Ignoring interest.");
+        // since we only respond to the first arriving interest for a given name, we need to ignore any subsequent ones.
+        //TODO: I think we want to check if an interest for this futureWFnameAndHash has been received before, not the SD name and hash. 
+        //I may need to add the futureWFnameAndHash to the m_SDservTracker structure above, and then search all entries to see if anything with that futureWFnameAndHash has already been received.
+
+        // Iterate through every service discovery tracking key
+        for (auto it = m_SDservTracker.begin(); it != m_SDservTracker.end(); ++it) 
+        {
+          const auto& serviceData = it.value();
+
+          // verify that "faceIN" exists and contains "WFnameAndHash"
+          if (serviceData.contains("faceIN") && serviceData["faceIN"].contains("WFnameAndHash")) 
+          {
+            std::string currentWFnameAndHash = serviceData["faceIN"]["WFnameAndHash"].get<std::string>();
+
+            // Match against the target workflow name
+            if (currentWFnameAndHash == futureWFnameAndHashString) 
+            {
+              NFD_LOG_DEBUG("Found a match! SD Tracked Key: " << it.key() << " maps to received WF name: " << futureWFnameAndHashString << ". Dropping received interest.");
+              return;
+            }
+          }
+        }
+
+      }
+    }
 
 
 
@@ -957,14 +1064,14 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
   this->setExpiryTimer(pitEntry, time::duration_cast<time::milliseconds>(lastExpiryFromNow));
 
 
-  ndn::Name simpleName;
-  simpleName = (interest.getName()).getPrefix(1); // get just the first component of the name, and convert to Uri string
-  std::string simpleStringName = simpleName.toUri();
+  ndn::Name prefixName;
+  prefixName = (interest.getName()).getPrefix(1); // get just the first component of the name (the prefix), and convert to Uri string
+  std::string prefixNameString = prefixName.toUri();
   
 
 /*
   // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
-  if (simpleStringName == "/nesco")
+  if (prefixNameString == "/nesco")
   {
     for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
     {
@@ -1014,7 +1121,7 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
       // go to outgoing Interest pipeline
       // scope control is unnecessary, because privileged app explicitly wants to forward
       this->onOutgoingInterest(interest, *nextHopFace, pitEntry);
-      if (simpleStringName == "/nescoSCOPT" && ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+      if (prefixNameString == "/nescoSCOPT" && ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
         this->sendShortcutOPTinterests(interest, ingress, pitEntry);
     }
     return;
@@ -1023,7 +1130,7 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
   // dispatch to strategy: after receive Interest
   m_strategyChoice.findEffectiveStrategy(*pitEntry)
     .afterReceiveInterest(interest, FaceEndpoint(ingress.face, 0), pitEntry);
-  if (simpleStringName == "/nescoSCOPT" && ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+  if (prefixNameString == "/nescoSCOPT" && ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
     this->sendShortcutOPTinterests(interest, ingress, pitEntry);
 
 }
@@ -1483,6 +1590,10 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
   name1 = name1.getSubName(1,1); // remove the zeroeth component of the name (/nesco), starting at component 1, keep 1 component
   std::string name1String = name1.toUri();
 
+  ndn::Name prefixName;
+  prefixName = (data.getName()).getPrefix(1); // get just the first component of the name (the prefix), and convert to Uri string
+  std::string prefixNameString = prefixName.toUri();
+
   //ndn::Name name2;
   //name2 = (data.getName()).getPrefix(-1); // remove the last component of the name (the parameter digest) so we have just the raw name
   //name2 = name2.getSubName(2,1); // remove the zeroeth and first component of the name (/nesco/serviceDiscovery), starting at component 2, keep 1 component
@@ -1526,8 +1637,77 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
 
 
+    // create name&pDAG just like it will be created by the regular consumer when the real workflow runs. The application parameters are different (less of them), so the hash will be different.
+    ndn::Name futureWFnameAndHash;
+    futureWFnameAndHash = (data.getName()).getPrefix(-1); // remove the last component of the name (the parameter digest) so we have just the raw name
+    futureWFnameAndHash = futureWFnameAndHash.getSubName(2,1); // remove the zeroeth component of the name (/nesco), and the first component of the name (/serviceDiscovery). starting at component 2, keep 1 component
+    //std::string futureWFnameAndHashString = "/nesco" + futureWFnameAndHash.toUri();
+    std::string futureWFnameAndHashString = prefixNameString + futureWFnameAndHash.toUri();
+
+    json dagObject;
+    dagObject["dag"]  = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["dag"];
+    dagObject["head"] = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["head"];
+    std::string updatedDagString = dagObject.dump();
+    // in order to convert from std::string to a char[] datatype we do the following (https://stackoverflow.com/questions/7352099/stdstring-to-char):
+    char *dagStringParameter = new char[updatedDagString.length() + 1];
+    strcpy(dagStringParameter, updatedDagString.c_str());
+    size_t lengthParam = strlen(dagStringParameter);
+
+    shared_ptr<Interest> dummyInterest = make_shared<Interest>();
+    dummyInterest->setName(futureWFnameAndHashString);
+    dummyInterest->setApplicationParameters((const uint8_t *)dagStringParameter, lengthParam);
+    futureWFnameAndHash = dummyInterest->getName();
+    futureWFnameAndHashString = futureWFnameAndHash.toUri();
 
 
+    // TODO: package code above into separate function as shown below.
+
+    //futureWFnameAndHash = generateWFnameAndHash(const Name& SDname, std::string dag, std::string head);
+    //futureWFnameAndHashString = futureWFnameAndHash.toUri();
+
+
+
+
+
+    if (prefixNameString == "or3")
+    {
+      for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
+      {
+        if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] == 1)
+        {
+          NFD_LOG_DEBUG("NFDServiceDiscovery, subsequent data packets for " << rxedDataNameAndHash << " has been received. Ignoring it.");
+          return;
+        }
+      }
+
+      NFD_LOG_DEBUG("NFDServiceDiscovery, first data packet for " << rxedDataNameAndHash << " has been received. Setting EFT to 99, setting up FIB entry, and generating data packet downstream");
+
+      m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] = 1;
+      // just use 99 (dummy value) for the EFT. This will be used for the FIB entry cost
+      m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["EFT"] = 99;
+
+      if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+        // remove entry
+        NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry and skipping creating FIB entry for " << futureWFnameAndHashString << " since first arriving SD data packet was on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
+        fib::Entry* exactA = m_fib.findExactMatch(futureWFnameAndHash);
+        if (exactA != nullptr) {
+          m_fib.erase(futureWFnameAndHash);
+          NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
+        }
+      if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+        // remove entry
+        NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry for " << futureWFnameAndHashString << " and creating updated entry afterwards.");
+        fib::Entry* exactB = m_fib.findExactMatch(futureWFnameAndHash);
+        if (exactB != nullptr) {
+          m_fib.erase(futureWFnameAndHash);
+          NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
+        }
+        // create new entry
+        NFD_LOG_DEBUG("NFDServiceDiscovery, OR^3 ingress face is NOT local. Going to try to add FIB entry.");
+        fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
+        m_fib.addOrUpdateNextHop(*entry, ingress.face, 99);
+      return;
+    }
 
     m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] = 1;
 
@@ -1739,26 +1919,7 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
       }
 
 
-      // create name&pDAG just like it will be created by the regular consumer when the real workflow runs. The application parameters are different (less of them), so the hash will be different.
-      ndn::Name futureWFnameAndHash;
-      futureWFnameAndHash = (data.getName()).getPrefix(-1); // remove the last component of the name (the parameter digest) so we have just the raw name
-      futureWFnameAndHash = futureWFnameAndHash.getSubName(2,1); // remove the zeroeth component of the name (/nesco), and the first component of the name (/serviceDiscovery). starting at component 2, keep 1 component
-      std::string futureWFnameAndHashString = "/nesco" + futureWFnameAndHash.toUri();
 
-      json dagObject;
-      dagObject["dag"]  = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["dag"];
-      dagObject["head"] = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["head"];
-      std::string updatedDagString = dagObject.dump();
-      // in order to convert from std::string to a char[] datatype we do the following (https://stackoverflow.com/questions/7352099/stdstring-to-char):
-      char *dagStringParameter = new char[updatedDagString.length() + 1];
-      strcpy(dagStringParameter, updatedDagString.c_str());
-      size_t lengthParam = strlen(dagStringParameter);
-
-      shared_ptr<Interest> dummyInterest = make_shared<Interest>();
-      dummyInterest->setName(futureWFnameAndHashString);
-      dummyInterest->setApplicationParameters((const uint8_t *)dagStringParameter, lengthParam);
-      futureWFnameAndHash = dummyInterest->getName();
-      futureWFnameAndHashString = futureWFnameAndHash.toUri();
 
 
 
@@ -1863,7 +2024,7 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
 //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (before looking at allocation reuse): " << std::setw(2) << m_SDservTracker << '\n');
 
 
-          // Check if the WFname&hash exists in the currently allocated services and that it can be reused.
+          // Check if the WFnameAndHash exists in the currently allocated services and that it can be reused.
           int64_t previousAllocationEFT = -1; // default value before we start analyzing EFTs.
           int64_t previousAllocationStart = -1; // default value before we start analyzing EFTs.
           std::string previousAllocationFace;
@@ -2073,7 +2234,12 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
 
         NFD_LOG_DEBUG("NFDServiceDiscovery - scheduling done");
 
-      }
+      } // end if resourceAllocation == 1
+
+
+
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data, before FIB entry analysis): " << std::setw(2) << m_SDservTracker << '\n');
+
 
 
 
@@ -2098,7 +2264,7 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
 
 
 /*
-m_FibOwnerTracker = {
+old m_FibOwnerTracker = {
     "/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
         "fibEntryExists": 0/1,                              // if any of the faceIDs below claim a fibOwner, this value will be 1, otherwise 0. Represents the actual FIB entry existing or not.
         "/service1/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
@@ -2132,7 +2298,9 @@ m_FibOwnerTracker = {
     }
 }
 
-m_FibOwnerTracker = {
+
+
+old m_FibOwnerTracker = {
     "/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
         "/service1/faceInIdString1&pDAG_param_hash": 0,     // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
                                                                 // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
@@ -2151,24 +2319,51 @@ m_FibOwnerTracker = {
         etc...
     }
 }
+
+
+
+m_FibOwnerTracker = {
+    "/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
+        "/service1/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+            "eft": 6,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+            "faceID": "260",                                    // faceID of the face where this EFT can be achieved
+            "faceType": "local"                               // local or non-local
+        }
+        "/service1/faceInIdString2&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+            "eft": 7,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+            "faceID": "262",                                    // faceID of the face where this EFT can be achieved
+            "faceType": "non-local"                           // local or non-local
+        }
+        "/service1/faceInIdString3&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+            "eft": 9,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+            "faceID": "258",                                    // faceID of the face where this EFT can be achieved
+            "faceType": "non-local"                           // local or non-local
+        }
+    },
+    "/service2/WFpDAG_param_hash": {                        // key has full name service/pDAG
+        "/service2/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+            "eft": 4,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+            "faceID": "260",                                    // faceID of the face where this EFT can be achieved
+            "faceType": "local"                               // local or non-local
+        }
+        "/service2/faceInIdString2&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+            "eft": 3,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+            "faceID": "258",                                    // faceID of the face where this EFT can be achieved
+            "faceType": "non-local"                           // local or non-local
+        }
+    },
+    "/service3/WFpDAG_param_hash": {                        // key has full name service/pDAG
+        etc...
+    }
+}
+
+
+
 */
 
-      // if it is a local face (to an application - to a locally hosted service), we don't create the FIB entry, and instead rely on the 0 cost regular FIB entry from the service itself.
-        // this is because the recorded face with lowest EFT is for the serviceDiscovery service's face, not the actual workflow service's face. Each application gets its own local face.
-      if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
-      {
-        NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is local. Going to try to delete FIB entry if it has no owner. This is for WF name " << futureWFnameAndHashString);
-        // if there is an existing FIB entry for this name&pDAG, remove it. We need to forward to this local face using regular FIB entry with just service name and cost 0.
-
-        // we can't just delete the entry if it exists. We may have several "active" requests with unique paths. Only the current path that this data packet was for has finished being analyzed.
-        //      Other paths may still be optimal, but since they all share the same futureWFnameAndHash for each face, removing this one would remove the other one(s) for that face too.
-        //      Look into perhaps keeping a local custom fib where we can store the rxedDataNameAndHash too. If we no longer need the fib entry (cuz it's not optimal), we can then check and see if there
-        //      are still other fib entries for this futureWFnameAndHash on that same face, and if there are, we don't remove the actual FIB entry. We only remove it once there are no more entries in the custom FIB for that particular face.
 
 /*
  // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
-if (futureWFnameAndHashString == "/nesco/service1/params-sha256=b11a48b8384e652ea726efb193902553c97041a52670bb25b5f2c19bb15a8af3")
-{
   for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
   {
     //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
@@ -2195,20 +2390,113 @@ if (futureWFnameAndHashString == "/nesco/service1/params-sha256=b11a48b8384e652e
       }
     }
   }
-}
 */
 
-        // make value of this specific rxedDataNameAndHash = 0
-        m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash] = 0;
+
+      // make value of this specific rxedDataNameAndHash = lowestEFT
+      m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["eft"] = lowestEFT;
+      m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceID"] = lowestFace;
+      if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+      {
+        m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceType"] = "local";
+      }
+      if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+      {
+        m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceType"] = "non-local";
+      }
+
+      // Iterate through all Service Discovery paths tracking this workflow entry, and see what the lowest EFT for this WF name and hash currently is, so that we can update the FIB entry.
+      uint64_t wfLowestEft = std::numeric_limits<uint64_t>::max();
+      std::string wfLowestFaceID = "";
+      std::string wfLowestFaceType = "";
+
+      const auto& pathsMap = m_FibOwnerTracker[futureWFnameAndHashString];
+      for (auto it = pathsMap.begin(); it != pathsMap.end(); ++it) {
+        const auto& pathData = it.value();
+
+        // Ensure all required fields exist in this inner entry to prevent crashes
+        if (pathData.contains("eft") && pathData.contains("faceID") && pathData.contains("faceType")) {
+          uint64_t currentEft = pathData["eft"].get<uint64_t>();
+
+          // Keep track of the absolute lowest EFT entry
+          if (currentEft < wfLowestEft) {
+            wfLowestEft = currentEft;
+            wfLowestFaceID = pathData["faceID"].get<std::string>();
+            wfLowestFaceType = pathData["faceType"].get<std::string>();
+          }
+        }
+      }
+
+      // if it is a local face (to an application - to a locally hosted service), we don't create the FIB entry, and instead rely on the 0 cost regular FIB entry from the service itself.
+        // this is because the recorded face with lowest EFT is for the serviceDiscovery service's face, not the actual workflow service's face. Each application gets its own local face.
+      if (wfLowestFaceType == "local")
+      {
+        // remove entry
+        NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry and skipping creating FIB entry for " << futureWFnameAndHashString << " since lowest EFT is achieved on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
+        fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
+        if (exact != nullptr) {
+          m_fib.erase(futureWFnameAndHash);
+          NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
+        }
+      }
+      if (wfLowestFaceType == "non-local")
+      {
+        // remove entry
+        NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry for " << futureWFnameAndHashString << " and creating updated entry afterwards.");
+        fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
+        if (exact != nullptr) {
+          m_fib.erase(futureWFnameAndHash);
+          NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
+        }
+
+        // create new entry
+        NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is NOT local. Going to try to add FIB entry.");
+        fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
+        Face* wfLowestCostFace;
+        for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+        {
+          wfLowestCostFace = &*it;
+          if (std::to_string(wfLowestCostFace->getId()) == wfLowestFaceID)
+          {
+            break;
+          }
+        }
+        m_fib.addOrUpdateNextHop(*entry, *wfLowestCostFace, wfLowestEft);
+      }
+
+
+
+
+
+/*
+      // if it is a local face (to an application - to a locally hosted service), we don't create the FIB entry, and instead rely on the 0 cost regular FIB entry from the service itself.
+        // this is because the recorded face with lowest EFT is for the serviceDiscovery service's face, not the actual workflow service's face. Each application gets its own local face.
+      if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+      {
+        NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is local. Going to try to delete FIB entry if it has no owner. This is for WF name " << futureWFnameAndHashString);
+        // if there is an existing FIB entry for this name&pDAG, remove it. We need to forward to this local face using regular FIB entry with just service name and cost 0.
+
+        // If we are doing allocation, then we can't just delete the entry if it exists. We may have several "active" requests with unique paths. Only the current path that this data packet was for has finished being analyzed.
+        //      Other paths may still be optimal, but since they all share the same futureWFnameAndHash for each face, removing this one would remove the other one(s) for that face too.
+        //      Look into perhaps keeping a local custom fib where we can store the rxedDataNameAndHash too. If we no longer need the fib entry (cuz it's not optimal), we can then check and see if there
+        //      are still other fib entries for this futureWFnameAndHash on that same face, and if there are, we don't remove the actual FIB entry. We only remove it once there are no more entries in the custom FIB for that particular face.
+
+
+
+        // make value of this specific rxedDataNameAndHash = lowestEFT
+        m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash] = lowestEFT;
+
+        // Optional Cleanup: Erase the specific path string entirely if it's no longer tracking an active owner. Otherwise, after a long time, this data structure will just keep growing indefinitely.
+        // m_FibOwnerTracker[futureWFnameAndHashString].erase(rxedDataNameAndHash);
 
         //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_FibOwnerTracker data structure: " << std::setw(2) << m_FibOwnerTracker << '\n');
-        // check if any other values for this futureWFnameAndHash is still a 1. If none, then remove real FIB entry
+        // check if any other values for this futureWFnameAndHash are still non-zero. If all are zero (no owners), then remove real FIB entry
         bool has_active_owner = false;
         if (m_FibOwnerTracker.contains(futureWFnameAndHashString))
         {
           for (auto& [service, value] : m_FibOwnerTracker[futureWFnameAndHashString].items())
           {
-            if (value == 1) {
+            if (value != 0) {
               has_active_owner = true;
               NFD_LOG_DEBUG("NFDServiceDiscovery, FIB entry has active owner (not deleting entry)");
               break; 
@@ -2235,12 +2523,86 @@ if (futureWFnameAndHashString == "/nesco/service1/params-sha256=b11a48b8384e652e
         NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is NOT local. Going to try to add FIB entry.");
         fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
         m_fib.addOrUpdateNextHop(*entry, *lowestCostFace, lowestEFT);
-        // make value of this specific rxedDataNameAndHash = 1. Create if doesn't exist? Make all other entries = 0?
-        m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash] = 1;
-        NFD_LOG_DEBUG("NFDServiceDiscovery, addNextHopRecord entry for " << futureWFnameAndHashString << " added to FIB, with face " << lowestCostFace->getId() << ", and cost " << lowestEFT << ". This is for rxedDataNameAndHash: " << rxedDataNameAndHash << "\n");
+
+        // start by making all entries = 0 (we will set the active one afterwards)
+        //if (m_FibOwnerTracker.contains(futureWFnameAndHashString))
+        //{
+        //  for (auto& [service, value] : m_FibOwnerTracker[futureWFnameAndHashString].items())
+        //  {
+        //   value = 0;
+        //  }
+        //}
+
+
+        // make value of this specific rxedDataNameAndHash = lowestEFT. Creates if doesn't exist
+        m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash] = lowestEFT;
+        NFD_LOG_DEBUG("NFDServiceDiscovery, addNextHopRecord FIB entry for " << futureWFnameAndHashString << " added to FIB, with face " << lowestCostFace->getId() << ", and cost " << lowestEFT << ". This is for rxedDataNameAndHash: " << rxedDataNameAndHash << "\n");
 //NFD_LOG_INFO("NFDServiceDiscovery, addNextHopRecord entry for " << futureWFnameAndHashString << " added to FIB, with face " << lowestCostFace->getId() << ", and cost " << lowestEFT << ". This is for rxedDataNameAndHash: " << rxedDataNameAndHash << "\n");
       }
 
+*/
+
+
+
+/*
+
+      if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+      {
+        NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry and skipping creating FIB entry for " << futureWFnameAndHashString << " since lowest EFT is achieved on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
+        fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
+        if (exact != nullptr) {
+          m_fib.erase(futureWFnameAndHash);
+          NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
+        }
+      }
+      if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+      {
+        NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry for " << futureWFnameAndHashString << " and creating a new one based on the latest known lowestEFT (which is on non-local face).");
+        fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
+        if (exact != nullptr) {
+          m_fib.erase(futureWFnameAndHash);
+          NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
+        }
+
+        NFD_LOG_DEBUG("NFDServiceDiscovery, adding FIB entry for " << futureWFnameAndHashString << " to non-local face.");
+        fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
+        m_fib.addOrUpdateNextHop(*entry, *lowestCostFace, lowestEFT);
+      }
+
+
+ // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
+//if (futureWFnameAndHashString == "/nesco/service2/params-sha256=f92147a800084a98e24f354dcfc1d04bae6aa768fed9ca86f1d546d4dfa13387")
+//{
+  for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+  {
+    //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
+    ndn::Name entryName;
+    entryName = fib_iterator->getPrefix();
+    entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
+    std::string entryString = entryName.toUri();
+
+    ndn::Name serviceName;
+    serviceName = fib_iterator->getPrefix();
+    serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
+    std::string serviceString = serviceName.toUri();
+
+    if (entryString == "/nesco")
+    {
+      if (fib_iterator->hasNextHops())
+      {
+        // figure out the faceID of all the nexthops in the list, and print them
+        const fib::NextHopList& hopList = fib_iterator->getNextHops();
+        for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+        {
+          NFD_LOG_INFO("CABEEEfibEntries: name " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
+        }
+      }
+    }
+  }
+//}
+
+
+*/
 
 
 
@@ -2277,10 +2639,13 @@ if (futureWFnameAndHashString == "/nesco/service1/params-sha256=b11a48b8384e652e
 
 
     // CPU ALLOCATION CHECK
-    if (data.getName().getPrefix(1).toUri() == "/nesco" ||
-        data.getName().getPrefix(1).toUri() == "/nescoSCOPT" ||
-        data.getName().getPrefix(1).toUri() == "/orchA" ||
-        data.getName().getPrefix(1).toUri() == "/orchB")
+    if (prefixNameString == "/nesco" ||
+        prefixNameString == "/nescoSCOPT" ||
+        prefixNameString == "/orchA" ||
+        prefixNameString == "/orchB" ||
+        prefixNameString == "/icnfc" ||
+        prefixNameString == "/ndnfcp" ||
+        prefixNameString == "/or3")
     {
       if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL) // only if data is coming from local face (if coming from local, it's from a service, and thus we need to report resource usage).
       {
@@ -2928,10 +3293,11 @@ Forwarder::onOutgoingData(const Data& data, Face& egress)
 {
   // get first part of the name, if it equals /nesco or /nescoscopt or /orchA or /orchB and it's going to a local face (our application), then print INFO message
   // this effectively counts the number of data packets that are arriving at their consumer
-  ndn::Name simpleName;
-  simpleName = (data.getName()).getPrefix(1); // get just the first component of the name, and convert to Uri string
-  std::string simpleStringName = simpleName.toUri();
-  if (simpleStringName == "/nesco" || simpleStringName == "/nescoSCOPT" || simpleStringName == "/orchA" || simpleStringName == "/orchB")
+  ndn::Name prefixName;
+  prefixName = (data.getName()).getPrefix(1); // get just the first component of the name (the prefix), and convert to Uri string
+  std::string prefixNameString = prefixName.toUri();
+  if (prefixNameString == "/nesco" || prefixNameString == "/nescoSCOPT" || prefixNameString == "/orchA" || prefixNameString == "/orchB" ||
+      prefixNameString == "/icnfc" || prefixNameString == "/ndnfcp" || prefixNameString == "/or3")
   {
     if (data.getName().getPrefix(-1).getSubName(1,1).toUri() == "/serviceDiscovery" ||
         data.getName().getPrefix(-1).getSubName(1,1).toUri() == "/serviceDiscovery2" ||

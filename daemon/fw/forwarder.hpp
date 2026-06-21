@@ -283,6 +283,9 @@ private:
   void
   sendEFTdataUpdate(std::string nameAndHash, int64_t lowestEFT);
 
+  //ndn::Name
+  //generateWFnameAndHash(const Name& SDname, std::string dag, std::string head);
+
 
   /** \brief insert Nonce to Dead Nonce List if necessary
    *  \param upstream if null, insert Nonces from all out-records;
