@@ -129,6 +129,7 @@ m_SDservTracker = {
           "inID": faceID1,                            // faceID where an interest for this service/pDAG has been received.
           "inName": "/service1/SDpDAG_param_hash",    // Notice we store the original name as received so we can respond with the same name when data arrives.
           "WFnameAndHash": "/service1/WFpDAG_param_hash",             // WFnameAndHash name could match with other ones below
+          "consumerName": "/consumer1",               // consumer's service name, used to know which consumer generated this specific request
           "serviceDiscovery": <0 or 1>,               // We add the setting for service discovery: 0 - disabled, 1 - enabled
           "resourceUtilization": <0 or 1>,            // We add the setting for resource utilization: 0 - disabled, 1 - enabled
           "resourceAllocation": <0 or 1>,             // We add the setting for resource allocation: 0 - disabled, 1 - enabled
@@ -168,6 +169,7 @@ m_SDservTracker = {
           "inID": faceID1,                            // faceID where an interest for this service/pDAG has been received.
           "inName": "/service1/SDpDAG_param_hash",    // Notice we store the original name as received so we can respond with the same name when data arrives.
           "WFnameAndHash": "/service1/WFpDAG_param_hash",             // WFnameAndHash name could match with other ones below
+          "consumerName": "/consumer2",               // consumer's service name, used to know which consumer generated this specific request
           "serviceDiscovery": <0 or 1>,               // We add the setting for service discovery: 0 - disabled, 1 - enabled
           "resourceUtilization": <0 or 1>,            // We add the setting for resource utilization: 0 - disabled, 1 - enabled
           "resourceAllocation": <0 or 1>,             // We add the setting for resource allocation: 0 - disabled, 1 - enabled
@@ -660,8 +662,34 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
 
 
+    if (prefixNameString == "/or3")
+    {
+      //NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on interest): " << std::setw(2) << m_SDservTracker << '\n');
 
+      // since we only respond to the first arriving interest for a given name, we need to ignore any subsequent ones.
+      // We want to check if an interest for this futureWFnameAndHash has been received before, not the SD name and hash. 
+      // thus, the futureWFnameAndHash is added to the m_SDservTracker structure above, and then we search all entries to see if anything with that futureWFnameAndHash has already been received.
 
+      // Iterate through every service discovery tracking key
+      for (auto it = m_SDservTracker.begin(); it != m_SDservTracker.end(); ++it) 
+      {
+        const auto& serviceData = it.value();
+
+        // verify that "faceIN" exists and contains "WFnameAndHash"
+        if (serviceData.contains("faceIN") && serviceData["faceIN"].contains("WFnameAndHash")) 
+        {
+          std::string currentWFnameAndHash = serviceData["faceIN"]["WFnameAndHash"].get<std::string>();
+          std::string currentConsumerName  = serviceData["faceIN"]["consumerName"].get<std::string>();
+
+          // Match against the target workflow name and only if interests are from the same consumer application
+          if (currentWFnameAndHash == futureWFnameAndHashString && currentConsumerName == dagObject["consumerName"]) 
+          {
+            NFD_LOG_DEBUG("Found a match! SD Tracked Key: " << it.key() << " maps to received WF name: " << futureWFnameAndHashString << ". Dropping received interest.");
+            return;
+          }
+        }
+      }
+    }
 
 
     // if faceIN ID in this name entry doesn't exist, create it so that we know to send data packets out through it later
@@ -672,6 +700,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
       m_SDservTracker[jsonName]["faceIN"]["inID"] = faceInId;                     // we record the faceID
       m_SDservTracker[jsonName]["faceIN"]["inName"] = interest.getName().toUri(); // we record the original name as it came in, so we know what name to use when we respond with data downstream.
       m_SDservTracker[jsonName]["faceIN"]["WFnameAndHash"] = futureWFnameAndHashString;
+      m_SDservTracker[jsonName]["faceIN"]["consumerName"] = dagObject["consumerName"];
       m_SDservTracker[jsonName]["faceIN"]["dag"] = dagObject["dag"];              // we capture the pDag here so that we can use it to generate the name we use for the FIB entry  we create later.
       m_SDservTracker[jsonName]["faceIN"]["head"] = dagObject["head"];            // we capture the "head" here so that we can use it to generate the name&hash we use for the FIB entry  we create later.
       m_SDservTracker[jsonName]["faceIN"]["serviceDiscovery"] = dagObject["serviceDiscovery"];  // we capture the setting here so that we know if we'll need to perform this later
@@ -681,115 +710,177 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
       m_SDservTracker[jsonName]["faceIN"]["scheduleCompaction"] = dagObject["scheduleCompaction"];  // we capture the setting here so that we know if we'll need to perform this later
       m_SDservTracker[jsonName]["faceIN"]["WFinterestRxedTime"] = timeNowNS + WFstartTimeNS - SDstartTimeNS;  // we capture the "WFinterestRxedTime" here so that we can use it for allocation slot reuse calculations later.
     }
-    else // name already existed (this isn't the first interest)
-    {
-      if (prefixNameString == "or3")
-      {
-        NFD_LOG_DEBUG("NFDServiceDiscovery, OR^3 subsequent interest packet received for name " << jsonName << ". Ignoring interest.");
-        // since we only respond to the first arriving interest for a given name, we need to ignore any subsequent ones.
-        //TODO: I think we want to check if an interest for this futureWFnameAndHash has been received before, not the SD name and hash. 
-        //I may need to add the futureWFnameAndHash to the m_SDservTracker structure above, and then search all entries to see if anything with that futureWFnameAndHash has already been received.
-
-        // Iterate through every service discovery tracking key
-        for (auto it = m_SDservTracker.begin(); it != m_SDservTracker.end(); ++it) 
-        {
-          const auto& serviceData = it.value();
-
-          // verify that "faceIN" exists and contains "WFnameAndHash"
-          if (serviceData.contains("faceIN") && serviceData["faceIN"].contains("WFnameAndHash")) 
-          {
-            std::string currentWFnameAndHash = serviceData["faceIN"]["WFnameAndHash"].get<std::string>();
-
-            // Match against the target workflow name
-            if (currentWFnameAndHash == futureWFnameAndHashString) 
-            {
-              NFD_LOG_DEBUG("Found a match! SD Tracked Key: " << it.key() << " maps to received WF name: " << futureWFnameAndHashString << ". Dropping received interest.");
-              return;
-            }
-          }
-        }
-
-      }
-    }
+    //else // name already existed (this isn't the first interest)
+    //{
+      //NFD_LOG_WARN("NFDServiceDiscovery, warning: subsequent SD interest packet received for name " << jsonName << " through the same historical path. Should this ever happen?");
+    //}
 
 
 
     //look at FIB, and see if this service is reachable out of any other faces. If so, send interest out through each face.
-    unsigned char interestBudget = 2; // don't send out too many interests to avoid overwhelming the network. Pick the lowest cost (next hop) faces.
-    for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
-    {
+    
+    // update 6/27/2026: if coming from non-local face, don't forward to every face. To avoid loops, we should only forward to the lowest cost face (just relay the interest).
+    // Only the local SD application should generate multiple interests (to every possible hosted instance) and in this case we send to all possible faces
 
-      ndn::Name name1;
-      name1 = fib_iterator->getPrefix();
-      name1 = name1.getSubName(1,1); // starting at component 1, get 1 component (/serviceDiscovery only)
-      std::string name1String = name1.toUri();
-      //NFD_LOG_DEBUG("NFDServiceDiscovery, fib name1String component 1 is " << name1String);
-
-      // FIB entries do not have the hash. When creating the data structure, I need to use the full interest name. THEN the for loop iterator can use the simple name for matching with FIB entries
-      ndn::Name name2;
-      name2 = fib_iterator->getPrefix();
-      name2 = name2.getSubName(2,1); // starting at component 2, get 1 component (name2 name only)
-      std::string name2String = name2.toUri();
-      //NFD_LOG_DEBUG("NFDServiceDiscovery, fib name2String component 2 is "<< name2String);
-
-
-      //NFD_LOG_DEBUG("NFDServiceDiscovery, interest head is "<< dagObject["head"]);
-      // only generate new serviceDiscovery interest if the incoming interest is for /serviceDiscovery, and this fib entry is for the service the interest is for
-      if ( (name1String == "/serviceDiscovery" || name1String == "/serviceDiscovery2") && name2String == dagObject["head"])
+    //if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+    //{
+      unsigned char interestBudget = 2; // don't send out too many interests to avoid overwhelming the network. Pick the lowest cost (next hop) faces.
+      for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
       {
 
-        //NFD_LOG_DEBUG("NFDServiceDiscovery, fib entry has matching /serviceDiscovery/serviceX name\n");
-        if (fib_iterator->hasNextHops())
+        ndn::Name name1;
+        name1 = fib_iterator->getPrefix();
+        name1 = name1.getSubName(1,1); // starting at component 1, get 1 component (/serviceDiscovery only)
+        std::string name1String = name1.toUri();
+        //NFD_LOG_DEBUG("NFDServiceDiscovery, fib name1String component 1 is " << name1String);
+
+        // FIB entries do not have the hash. When creating the data structure, I need to use the full interest name. THEN the for loop iterator can use the simple name for matching with FIB entries
+        ndn::Name name2;
+        name2 = fib_iterator->getPrefix();
+        name2 = name2.getSubName(2,1); // starting at component 2, get 1 component (name2 name only)
+        std::string name2String = name2.toUri();
+        //NFD_LOG_DEBUG("NFDServiceDiscovery, fib name2String component 2 is "<< name2String);
+
+
+        //NFD_LOG_DEBUG("NFDServiceDiscovery, interest head is "<< dagObject["head"]);
+        // only generate new serviceDiscovery interest if the incoming interest is for /serviceDiscovery, and this fib entry is for the service the interest is for
+        if ( (name1String == "/serviceDiscovery" || name1String == "/serviceDiscovery2") && name2String == dagObject["head"])
         {
 
-          //NFD_LOG_DEBUG("NFDServiceDiscovery, fib_iterator has nextHops, iterating to all faces...\n");
-          const fib::NextHopList& hopList = fib_iterator->getNextHops();
-          for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+          //NFD_LOG_DEBUG("NFDServiceDiscovery, fib entry has matching /serviceDiscovery/serviceX name\n");
+          if (fib_iterator->hasNextHops())
           {
-            //NFD_LOG_DEBUG("NFDServiceDiscovery, looking at all hops for this fib entry\n");
-            if (hop_iterator->getFace().getId() != ingress.face.getId()) // do not send new interest out of the incoming face (avoid loops).
-            {
 
-              if (interestBudget > 0)
+            //NFD_LOG_DEBUG("NFDServiceDiscovery, fib_iterator has nextHops, iterating to all faces...\n");
+            const fib::NextHopList& hopList = fib_iterator->getNextHops();
+            for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+            {
+              //NFD_LOG_DEBUG("NFDServiceDiscovery, looking at all hops for this fib entry\n");
+              if (hop_iterator->getFace().getId() != ingress.face.getId()) // do not send new interest out of the incoming face (avoid loops).
               {
 
-                // if faceOUT ID in this name entry doesn't exist, create it (mark interest generated as False and data received as False, delay as -1, EFT as -1).
-                if (!m_SDservTracker[jsonName]["faceOUT"].contains(std::to_string(hop_iterator->getFace().getId())))
+                if (interestBudget > 0)
                 {
-                  m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = 0;
-                  m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["dataRx"] = 0;
-                  m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["linkDelay"] = -1;
-                  m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["EFT"] = -1;
-                }
-                // if we have not yet generated this interest out of this face, then generate it and mark it as generated
-                if (m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] == 0)
-                {
-                  // if interest is already marked as generated, skip sending a new one out. (we already added the faceIN id to the data structure above)
-                  // This happens for example when N1/S3 requests S1, and we already had received interests for S1 from N2/S3.
-                  // Just let it add the entry and drop the new interest.
 
-                  //NFD_LOG_DEBUG("NFDServiceDiscovery, generating interest " << interest.getName().toUri() << ", for face with faceID: " << hop_iterator->getFace().getId());
-                  //hop_iterator->getFace().sendInterest(interest);
-                  NFD_LOG_DEBUG("NFDServiceDiscovery, generating interest " << new_interest->getName().toUri() << ", for face with faceID: " << hop_iterator->getFace().getId());
-                  hop_iterator->getFace().sendInterest(*new_interest);
-                  //interestBudget--;
+                  // if faceOUT ID in this name entry doesn't exist, create it (mark interest generated as False and data received as False, delay as -1, EFT as -1).
+                  if (!m_SDservTracker[jsonName]["faceOUT"].contains(std::to_string(hop_iterator->getFace().getId())))
+                  {
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = 0;
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["dataRx"] = 0;
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["linkDelay"] = -1;
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["EFT"] = -1;
+                  }
+                  // if we have not yet generated this interest out of this face, then generate it and mark it as generated
+                  if (m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] == 0)
+                  {
+                    // if interest is already marked as generated, skip sending a new one out. (we already added the faceIN id to the data structure above)
+                    // This happens for example when N1/S3 requests S1, and we already had received interests for S1 from N2/S3.
+                    // Just let it add the entry and drop the new interest.
 
-                  // mark this interest as generated.
-                  m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = 1;
-                }
-                else
-                {
-                  NFD_LOG_DEBUG("NFDServiceDiscovery, We are trying to send out this interest through this face again (but won't): " << jsonName << ", for face with faceID: " << hop_iterator->getFace().getId());
+                    //NFD_LOG_DEBUG("NFDServiceDiscovery, generating interest " << interest.getName().toUri() << ", for face with faceID: " << hop_iterator->getFace().getId());
+                    //hop_iterator->getFace().sendInterest(interest);
+                    NFD_LOG_DEBUG("NFDServiceDiscovery, generating interest " << new_interest->getName().toUri() << ", for face with faceID: " << hop_iterator->getFace().getId());
+                    hop_iterator->getFace().sendInterest(*new_interest);
+                    //interestBudget--;
+
+                    // mark this interest as generated.
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = 1;
+                  }
+                  else
+                  {
+                    NFD_LOG_DEBUG("NFDServiceDiscovery, We are trying to send out this interest through this face again (but won't): " << jsonName << ", for face with faceID: " << hop_iterator->getFace().getId());
+                  }
                 }
               }
             }
           }
+          //else
+            //NFD_LOG_DEBUG("NFDServiceDiscovery, fib_iterator does not have nextHops\n");
         }
-        //else
-          //NFD_LOG_DEBUG("NFDServiceDiscovery, fib_iterator does not have nextHops\n");
-      }
 
-    } // FIB iteration for loop
+      } // FIB iteration for loop
+    //} // if face is local
+/*    
+    if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+    {
+      unsigned char interestBudget = 1; // for a non-local face, we just send one interest to the lowest cost face (we just relay the interest)
+      for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+      {
+
+        ndn::Name name1;
+        name1 = fib_iterator->getPrefix();
+        name1 = name1.getSubName(1,1); // starting at component 1, get 1 component (/serviceDiscovery only)
+        std::string name1String = name1.toUri();
+        //NFD_LOG_DEBUG("NFDServiceDiscovery, fib name1String component 1 is " << name1String);
+
+        // FIB entries do not have the hash. When creating the data structure, I need to use the full interest name. THEN the for loop iterator can use the simple name for matching with FIB entries
+        ndn::Name name2;
+        name2 = fib_iterator->getPrefix();
+        name2 = name2.getSubName(2,1); // starting at component 2, get 1 component (name2 name only)
+        std::string name2String = name2.toUri();
+        //NFD_LOG_DEBUG("NFDServiceDiscovery, fib name2String component 2 is "<< name2String);
+
+
+        //NFD_LOG_DEBUG("NFDServiceDiscovery, interest head is "<< dagObject["head"]);
+        // only generate new serviceDiscovery interest if the incoming interest is for /serviceDiscovery, and this fib entry is for the service the interest is for
+        if ( (name1String == "/serviceDiscovery" || name1String == "/serviceDiscovery2") && name2String == dagObject["head"])
+        {
+
+          //NFD_LOG_DEBUG("NFDServiceDiscovery, fib entry has matching /serviceDiscovery/serviceX name\n");
+          if (fib_iterator->hasNextHops())
+          {
+
+            //NFD_LOG_DEBUG("NFDServiceDiscovery, fib_iterator has nextHops, iterating to all faces...\n");
+            const fib::NextHopList& hopList = fib_iterator->getNextHops();
+            for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+            {
+              //NFD_LOG_DEBUG("NFDServiceDiscovery, looking at all hops for this fib entry\n");
+              if (hop_iterator->getFace().getId() != ingress.face.getId()) // do not send new interest out of the incoming face (avoid loops).
+              {
+
+                if (interestBudget > 0)
+                {
+
+                  // if faceOUT ID in this name entry doesn't exist, create it (mark interest generated as False and data received as False, delay as -1, EFT as -1).
+                  if (!m_SDservTracker[jsonName]["faceOUT"].contains(std::to_string(hop_iterator->getFace().getId())))
+                  {
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = 0;
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["dataRx"] = 0;
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["linkDelay"] = -1;
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["EFT"] = -1;
+                  }
+                  // if we have not yet generated this interest out of this face, then generate it and mark it as generated
+                  if (m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] == 0)
+                  {
+                    // if interest is already marked as generated, skip sending a new one out. (we already added the faceIN id to the data structure above)
+                    // This happens for example when N1/S3 requests S1, and we already had received interests for S1 from N2/S3.
+                    // Just let it add the entry and drop the new interest.
+
+                    //NFD_LOG_DEBUG("NFDServiceDiscovery, generating interest " << interest.getName().toUri() << ", for face with faceID: " << hop_iterator->getFace().getId());
+                    //hop_iterator->getFace().sendInterest(interest);
+                    NFD_LOG_DEBUG("NFDServiceDiscovery, generating interest " << new_interest->getName().toUri() << ", for face with faceID: " << hop_iterator->getFace().getId());
+                    hop_iterator->getFace().sendInterest(*new_interest);
+                    interestBudget--;
+
+                    // mark this interest as generated.
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = 1;
+                    return;
+                  }
+                  else
+                  {
+                    NFD_LOG_DEBUG("NFDServiceDiscovery, We are trying to send out this interest through this face again (but won't): " << jsonName << ", for face with faceID: " << hop_iterator->getFace().getId());
+                  }
+                }
+              }
+            }
+          }
+          //else
+            //NFD_LOG_DEBUG("NFDServiceDiscovery, fib_iterator does not have nextHops\n");
+        }
+
+      } // FIB iteration for loop
+    } if face is non-local
+*/
 
 //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Interest): " << std::setw(2) << m_SDservTracker << '\n');
     //std::cout << "\nnode " << (*node).GetId() << " NFDServiceDiscovery - m_SDservTracker data structure (on Interest) has " << m_SDservTracker.size() << " entries.\n";
@@ -801,10 +892,213 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
     
     return;
-  }
+
+  } // end if (serviceDiscovery or serviceDiscovery2)
 
   else // regular interest processing
   {
+    if (prefixNameString == "/icnfc")
+    {
+      // if icnfc, find upstreamFace based on next M services and if they are all accessible out of the same face.
+
+      // decode the DAG string contained in the application parameters, so we can analyze the next upstream services
+      auto dagParameterFromInterest = interest.getApplicationParameters();
+      std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
+
+      // read the dag parameters and figure out which services will run next.
+      json dagObject = json::parse(dagString);
+      //NS_LOG_DEBUG("\n\nNFD node: Full DAG as received: " << std::setw(2) << dagObject << '\n');
+
+      uint8_t parameterM = 2;
+      bool useRegularRouting = false;
+      std::string currentService = dagObject["head"];
+      std::string nextService = "";
+      std::string sinkService = "";
+
+
+      nfd::FaceId currentLowestCostFaceId = 0;
+      nfd::FaceId prevLowestCostFaceId = 0;
+      bool hasPrevFace = false;
+
+      // find the sink service
+      for (auto& x : dagObject["dag"].items())
+      {
+        for (auto& y : dagObject["dag"][x.key()].items())
+        {
+          // y.key() is the next downstream service. If it doesn't exist as a top-level key in the DAG, it's the sink!
+/*
+          bool dependentFound = false;
+          for (auto& x2 : dagObject["dag"].items())
+          {
+            if (y.key() == x2.key())
+            {
+              dependentFound = true;
+              break;
+            }
+          }
+          if (!dependentFound)
+          {
+            sinkService = y.key();
+          }
+*/
+          if (!dagObject["dag"].contains(y.key()))
+          {
+            sinkService = y.key();
+            break;
+          }
+        }
+        if (!sinkService.empty()) {
+          break; // Found the unique sink, exit outer loop
+        }
+      }
+
+      bool doneSearching = false;
+      while (!doneSearching)
+      {
+
+        // find which face has the lowest cost to find the currentService
+        bool fibEntryFound = false;
+
+/*
+        for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+        {
+          //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
+          ndn::Name entryName;
+          entryName = fib_iterator->getPrefix();
+          entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (prefix only)
+          std::string entryString = entryName.toUri();
+
+          ndn::Name serviceName;
+          serviceName = fib_iterator->getPrefix();
+          serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
+          std::string serviceString = serviceName.toUri();
+
+
+          // only look at FIB entries if the fib iterator is for the next downstream service
+          if (entryString == prefixNameString && serviceString == currentService)
+          {
+            if (fib_iterator->hasNextHops())
+            {
+              // figure out the faceID of the lowest cost nexthop in the list
+              const fib::NextHopList& hopList = fib_iterator->getNextHops();
+              // print all the next hops and costs
+              for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+              {
+                NFD_LOG_DEBUG("CABEEEfibEntries: interest " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
+              }
+              currentLowestCostFaceId = hopList.front().getFace().getId();
+              fibEntryFound = true;
+            }
+            break;
+          }
+        }
+*/
+
+        // Performance Optimization: Construct the precise NDN Name and let NFD find it instantly instead of doing an expensive O(N) full-table loop scan.
+        ndn::Name targetPrefix(prefixNameString);
+        targetPrefix.append(currentService);
+
+        fib::Entry* fibEntry = m_fib.findExactMatch(targetPrefix);
+        if (fibEntry != nullptr && fibEntry->hasNextHops())
+        {
+          const fib::NextHopList& hopList = fibEntry->getNextHops();
+          
+          // debug loop
+          for (auto hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+          {
+            NFD_LOG_DEBUG("CABEEEfibEntries: interest " << fibEntry->getPrefix().toUri() 
+                          << ", faceID: " << hop_iterator->getFace().getId() 
+                          << ", cost: " << hop_iterator->getCost());
+          }
+
+          currentLowestCostFaceId = hopList.front().getFace().getId();
+          fibEntryFound = true;
+        }
+
+
+
+
+
+        // If the service isn't in our routing table, drop down to standard routing safely without crashing
+        if (!fibEntryFound)
+        {
+          useRegularRouting = true;
+          break;
+        }
+
+        if (currentService == dagObject["head"])
+        {
+          prevLowestCostFaceId = currentLowestCostFaceId;
+          hasPrevFace = true;
+        }
+        else if (hasPrevFace && currentLowestCostFaceId != prevLowestCostFaceId)
+        {
+          useRegularRouting = true;
+          doneSearching = true;
+        }
+        prevLowestCostFaceId = currentLowestCostFaceId;
+
+        // find what service in the DAG is the next downstream service
+        // if we already reached M services, or reached the sink service, then exit loop
+        parameterM--;
+        if (parameterM == 0 || currentService == sinkService)
+        {
+          doneSearching = true;
+        }
+        else
+        {
+          nextService = ""; // clear state to prevent cross-iteration leaks
+          for (auto& x : dagObject["dag"].items())
+          {
+            //std::cout << "Checking x.key: " << (std::string)x.key() << '\n';
+            if (x.key() == currentService)
+            {
+              for (auto& y : dagObject["dag"][x.key()].items())
+              {
+                //std::cout << "Checking y.key: " << (std::string)y.key() << '\n';
+                nextService = y.key();
+              }
+            }
+          }
+          if (nextService.empty())
+          {
+            doneSearching = true;
+          }
+          else
+          {
+            currentService = nextService;
+          }
+        }
+
+
+      } // end while (!doneSearching)
+
+      if (!useRegularRouting)
+      {
+        // create new FIB entry
+        NFD_LOG_DEBUG("NFD Forwarder, ICN-FC try to add FIB entry.");
+        fib::Entry* entry = m_fib.insert(interest.getName()).first;
+        Face* upstreamFace;
+        for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+        {
+          upstreamFace = &*it;
+          if (upstreamFace->getId() == currentLowestCostFaceId)
+          {
+            break;
+          }
+        }
+        m_fib.addOrUpdateNextHop(*entry, *upstreamFace, 99);
+      }
+
+    } // end prefixNameString == icnfc
+
+
+    if (prefixNameString == "/ndnfcp")
+    {
+      //TODO: if ndnfcp, find upstreamFace based on weighted calculation betwee next service's hop count and how many times that service has been called in past T seconds.
+      NFD_LOG_DEBUG("NFD Forwarder, NDN-FC+ yet to be implemented.");
+    }
+
 
 
     // PIT insert
@@ -1668,15 +1962,26 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
 
 
-
-    if (prefixNameString == "or3")
+    if (prefixNameString == "/or3")
     {
-      for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
+      // iterate through ALL items for the WF name and hash, not the SD name and hash
+      // technically, we should have never generated more interests for the same WF name and hash request coming in from a different path. Any subsequent requests to this node should have been ignored, so these
+      // extra SD name and hash entries would not exist, and the code below should be sufficient.
+      //TODO: extract consumer name from the data name (/nesco/sd2/service/consumerX)
+      std::string consumerName = data.getName().getPrefix(-1).getSubName(4,1).toUri(); // get rid of param digest, then starting at component 4, keep 1 component
+      for (auto& serviceIterator : m_SDservTracker.items())
       {
-        if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] == 1)
+        if (m_SDservTracker[serviceIterator.key()]["faceIN"]["WFnameAndHash"] == futureWFnameAndHashString &&
+            m_SDservTracker[serviceIterator.key()]["faceIN"]["consumerName"] == consumerName)
         {
-          NFD_LOG_DEBUG("NFDServiceDiscovery, subsequent data packets for " << rxedDataNameAndHash << " has been received. Ignoring it.");
-          return;
+          for (auto& faceOutIterator : m_SDservTracker[serviceIterator.key()]["faceOUT"].items())
+          {
+            if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] == 1)
+            {
+              NFD_LOG_DEBUG("NFDServiceDiscovery, subsequent data packet for " << rxedDataNameAndHash << " has been received. Ignoring it.");
+              return;
+            }
+          }
         }
       }
 
@@ -1687,6 +1992,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["EFT"] = 99;
 
       if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+      {
         // remove entry
         NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry and skipping creating FIB entry for " << futureWFnameAndHashString << " since first arriving SD data packet was on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
         fib::Entry* exactA = m_fib.findExactMatch(futureWFnameAndHash);
@@ -1694,7 +2000,9 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
           m_fib.erase(futureWFnameAndHash);
           NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
         }
+      }
       if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+      {
         // remove entry
         NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry for " << futureWFnameAndHashString << " and creating updated entry afterwards.");
         fib::Entry* exactB = m_fib.findExactMatch(futureWFnameAndHash);
@@ -1706,8 +2014,29 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
         NFD_LOG_DEBUG("NFDServiceDiscovery, OR^3 ingress face is NOT local. Going to try to add FIB entry.");
         fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
         m_fib.addOrUpdateNextHop(*entry, ingress.face, 99);
+      }
+
+      // forward the packet further downstream!!
+      this->sendEFTdataUpdate(rxedDataNameAndHash, 99);
+
+      // reset things for the next SD
+/*
+      for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
+      {
+        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["intTx"] = 0;
+        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] = 0;
+        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["linkDelay"] = -1;
+        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"] = -1;
+      }
+*/
+      m_SDservTracker[rxedDataNameAndHash]["faceIN"]["WFnameAndHash"] = "";
+
       return;
-    }
+
+    } // end if (or3)
+
+
+
 
     m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] = 1;
 
@@ -2617,7 +2946,8 @@ m_FibOwnerTracker = {
       //m_SDservTracker[rxedDataNameAndHash].erase("faceOUT"); // only erase the "faceOUT" portion, otherwise we would be removing the CPU scheduling information!
       // we can't just erase the faceOUT portion, because I'm trying to use it for disseminating schedulerRelease messages too! So instead we just reset all the values.
       // Actually, we can just leave the values as they were. This way, after schedule compaction, an update message will trigger EFT adjustments even if only one input is updated.
-/*
+
+
       for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
       {
         m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["intTx"] = 0;
@@ -2625,7 +2955,8 @@ m_FibOwnerTracker = {
         m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["linkDelay"] = -1;
         m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"] = -1;
       }
-*/
+
+
 
 //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after sending downstream): " << std::setw(2) << m_SDservTracker << '\n');
 
