@@ -283,6 +283,9 @@ private:
   void
   sendEFTdataUpdate(std::string nameAndHash, int64_t lowestEFT);
 
+  void
+  sendEFTdataUpdateFromCache(std::string nameAndHash, int64_t lowestEFT, const FaceEndpoint& ingress);
+
   //ndn::Name
   //generateWFnameAndHash(const Name& SDname, std::string dag, std::string head);
 

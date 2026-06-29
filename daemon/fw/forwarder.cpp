@@ -379,6 +379,7 @@ Forwarder::onIncomingInterest(const Interest& interest, const FaceEndpoint& ingr
   ndn::Name prefixName;
   prefixName = (interest.getName()).getPrefix(1); // get just the first component of the name (the prefix), and convert to Uri string
   std::string prefixNameString = prefixName.toUri();
+  std::string serviceDiscoveryNameString = interest.getName().getPrefix(-1).getSubName(1,1).toUri();
 
 
   // get first part of the name, if it equals /nesco or /nescoscopt or /orchA or /orchB and it's coming from a local face (our application), then print INFO message
@@ -566,8 +567,8 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
 
   // service discovery interest processing (no PIT entry created)
-  if (interest.getName().getPrefix(-1).getSubName(1,1).toUri() == "/serviceDiscovery" || // remove last comopnent (app parameter), then starting at component 1, get 1 component (where /serviceDiscovery would be)
-      interest.getName().getPrefix(-1).getSubName(1,1).toUri() == "/serviceDiscovery2")  // remove last comopnent (app parameter), then starting at component 1, get 1 component (where /serviceDiscovery would be)
+  if (serviceDiscoveryNameString == "/serviceDiscovery" || // remove last comopnent (app parameter), then starting at component 1, get 1 component (where /serviceDiscovery would be)
+      serviceDiscoveryNameString == "/serviceDiscovery2")  // remove last comopnent (app parameter), then starting at component 1, get 1 component (where /serviceDiscovery would be)
   {
     // Determine which interfaces can be used to reach the named service, and generate a new interest for the name service out of each of the faces (even local ones for teh APP).
     // keep track of which ones have left, so that when data packets arrive, I can evaluate their EFTs. Once all have returned, generate data packet with lowest EFT.
@@ -717,10 +718,100 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
 
 
+
+    //TODO: look at content store. If WF results are cached and are still fresh, then respond with SD data packet and an EFT that represents zero computation time.
+    ndn::Interest strictInterest(futureWFnameAndHash);
+    strictInterest.setCanBePrefix(false); // Forces an exact name match in the CS
+
+    //auto csEntry = m_cs.find(*static_cast<const ndn::Interest*>(&strictInterest));
+    bool isCachedAndFresh = false;
+    m_cs.find(strictInterest,
+        [&](const Interest& i, const Data& cachedData) {
+            // --- CONTENT STORE HIT ---
+            // This block runs if an exact match exists and satisfies your criteria
+            isCachedAndFresh = true;
+            NFD_LOG_INFO("Custom CS Check: Found fresh data packet for " << i.getName());
+        },
+        [&](const Interest& i) {
+            // --- CONTENT STORE MISS ---
+            // This block runs if the data is missing or stale
+            isCachedAndFresh = false;
+            NFD_LOG_INFO("Custom CS Check: Data missing or stale for " << i.getName());
+        }
+    );
+
+
+    if (isCachedAndFresh)
+    {
+      // respond with SD data packet and an EFT that represents zero computation time.
+      // this will involve updating the tracker data structure, and perhaps marking all the faceOUT interests are received??
+      NFD_LOG_DEBUG("NFDServiceDiscovery - content store entry for " << futureWFnameAndHashString << " is not stale! Responding with data packet containing EFT with zero computation.");
+
+      int64_t cachedResultsEFT = timeNowNS + WFstartTimeNS - SDstartTimeNS;
+
+      std::string fullNameForResponse = prefixNameString + serviceDiscoveryNameString + rxedInterestNameAndHash;
+      NFD_LOG_DEBUG("NFDServiceDiscovery - calling sendEFTdataUpdateFromCache with fullNameForResponse=" << fullNameForResponse << " and cachedResultsEFT=" << cachedResultsEFT);
+      this->sendEFTdataUpdateFromCache(fullNameForResponse, cachedResultsEFT, ingress);
+
+      for (auto& faceOutIterator : m_SDservTracker[rxedInterestNameAndHash]["faceOUT"].items())
+      {
+        m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["intTx"] = 0;
+        m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] = 0;
+        m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["linkDelay"] = -1;
+        m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"] = -1;
+      }
+
+      return;
+    }
+
+/*
+    //if (csEntry != nullptr) {
+      // Data exists in the CS!
+      // You can access the exact matched Data packet using csEntry->getData()
+      //const Data& cachedData = csEntry->getData();
+      // Make your custom forwarding bypass or state change decision here
+      NFD_LOG_DEBUG("NFDServiceDiscovery - content store contains entry for " << futureWFnameAndHashString);
+
+      const Data& cachedData = csEntry->getData();
+      // Get the freshness lifespan (e.g., 10000ms)
+      auto freshnessPeriod = cachedData.getFreshnessPeriod(); 
+      // 2. Calculate the current age of the data in the cache
+      // NFD entries track their initial insertion/arrival time
+      auto currentAge = ndn::time::steady_clock::now() - csEntry->getArrivalTime();
+      bool isStale = false;
+      if (freshnessPeriod == ndn::time::milliseconds::zero()) {
+        // If FreshnessPeriod is 0, it behaves as stale ONLY IF the interest demands freshness.
+        // Otherwise, it can be served to standard interests indefinitely.
+        isStale = false;
+      }
+      else if (currentAge > freshnessPeriod) {
+        // The data has sat in the cache longer than the producer intended
+        isStale = true;
+      }
+      // if (csEntry->getExpiry() > ndn::time::steady_clock::now()) to verify freshness.
+
+      if (!isStale)
+      {
+        //TODO: respond with SD data packet and an EFT that represents zero computation time.
+        // this will involve updating the tracker data structure, and perhaps marking all the faceOUT interests are received??
+        NFD_LOG_DEBUG("NFDServiceDiscovery - content store entry for " << futureWFnameAndHashString << " is not stale! Responding with data packet containing EFT with zero computation.");
+
+        int64_t cachedResultsEFT = timeNowNS + WFstartTimeNS - SDstartTimeNS;
+
+        this->sendEFTdataUpdateFromCache(rxedInterestNameAndHash, cachedResultsEFT, ingress);
+
+
+      }
+    //}
+    //else {
+      // Data does not exist in the CS
+    //}
+*/
+
+
+
+
     //look at FIB, and see if this service is reachable out of any other faces. If so, send interest out through each face.
-    
-    // update 6/27/2026: if coming from non-local face, don't forward to every face. To avoid loops, we should only forward to the lowest cost face (just relay the interest).
-    // Only the local SD application should generate multiple interests (to every possible hosted instance) and in this case we send to all possible faces
 
     //if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
     //{
@@ -801,6 +892,9 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
       } // FIB iteration for loop
     //} // if face is local
 /*    
+    // testing on 6/27/2026: if coming from non-local face, don't forward to every face. To avoid loops, we should only forward to the lowest cost face (just relay the interest).
+    // Only the local SD application should generate multiple interests (to every possible hosted instance) and in this case we send to all possible faces
+
     if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
     {
       unsigned char interestBudget = 1; // for a non-local face, we just send one interest to the lowest cost face (we just relay the interest)
@@ -3190,8 +3284,10 @@ m_FibOwnerTracker = {
 void
 Forwarder::sendEFTdataUpdate(std::string nameAndHash, int64_t lowestEFT)
 {
-  // create data packet, but use stored name/hash!
+
+    // create data packet, but use stored name/hash!
   std::string storedName = m_SDservTracker[nameAndHash]["faceIN"]["inName"];
+
   auto new_data = std::make_shared<ndn::Data>(storedName);
   //new_data->setFreshnessPeriod(data.getFreshnessPeriod());
   new_data->setFreshnessPeriod(ndn::time::milliseconds(3000));
@@ -3239,6 +3335,58 @@ Forwarder::sendEFTdataUpdate(std::string nameAndHash, int64_t lowestEFT)
   this->onOutgoingData(*new_data, *downFace);
 }
 
+
+void
+Forwarder::sendEFTdataUpdateFromCache(std::string nameAndHash, int64_t lowestEFT, const FaceEndpoint& ingress)
+{
+  // if responding with cached contents, we don't have an entry in m_SDservTracker, we just respond using the same name as the interest that came in.
+
+  auto new_data = std::make_shared<ndn::Data>(nameAndHash);
+  //new_data->setFreshnessPeriod(data.getFreshnessPeriod());
+  new_data->setFreshnessPeriod(ndn::time::milliseconds(3000));
+
+  unsigned char myBuffer[1024];
+  json dataPacketContents;
+  ns3::Time timeNow;
+  timeNow = ns3::Simulator::Now();
+  // Convert to integer in milliseconds and then to string
+  int64_t timeNowNS = timeNow.ToInteger(ns3::Time::NS);
+  std::string timeStringNS = std::to_string(timeNowNS);
+  dataPacketContents["txTime"] = timeNowNS;
+  dataPacketContents["EFT"] = lowestEFT;
+
+  std::string dataPacketString = dataPacketContents.dump();
+  
+  //NFD_LOG_DEBUG("The data packet EFT (lowest) is " << lowestEFT);
+  //NFD_LOG_DEBUG("The data packet string is " << dataPacketString);
+
+  // instead of just writing a single value to the buffer, now we write the JSON data structure containing EFT and tx timestamp
+  // write to the buffer, after making sure it's big enough
+  if (strlen(dataPacketString.c_str())+1 > 1024) // string length plus NULL terminating character
+  {
+    NFD_LOG_ERROR("NFD SD Forwarding ERROR!! The data packet size is larger than 1024!!!");
+  }
+  //else
+  //{
+    //NFD_LOG_DEBUG("The data packet size using strlen+1 is " << strlen(dataPacketString.c_str())+1);
+    //NFD_LOG_DEBUG("The data packet size using length+1 operator is " << dataPacketString.length()+1);
+  //}
+  memcpy(myBuffer, dataPacketString.c_str(), strlen(dataPacketString.c_str())+1);
+  //new_data->setContent(myBuffer, 1024); // make the data always 1024 bytes long
+  new_data->setContent(myBuffer, strlen(dataPacketString.c_str())+1); // make the data just big enough to fit the json object
+
+  new_data->setSignatureInfo(ndn::SignatureInfo(tlv::NullSignature));
+  new_data->setSignatureValue(std::make_shared<ndn::Buffer>());
+  new_data->wireEncode();
+  //NFD_LOG_DEBUG("Sending Data packet for " << new_data->getName());
+
+  // we now only have one IN face
+  Face* downFace = &ingress.face;
+  NFD_LOG_DEBUG("NFDServiceDiscovery, EFTdataUpdate packet for " << nameAndHash << " is being sent downstream as " << nameAndHash << " through face " << downFace->getId());
+//NFD_LOG_INFO("NFDServiceDiscovery, EFTdataUpdate packet for " << nameAndHash << " is being sent downstream as " << nameAndHash << " through face " << downFace->getId());
+
+  this->onOutgoingData(*new_data, *downFace);
+}
 
 
 
