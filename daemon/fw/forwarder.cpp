@@ -49,6 +49,7 @@ using json = nlohmann::json;
 
 #include <queue>
 #include <memory>
+#include <limits>
 
 namespace nfd {
 
@@ -718,51 +719,53 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
 
 
-
-    //TODO: look at content store. If WF results are cached and are still fresh, then respond with SD data packet and an EFT that represents zero computation time.
-    ndn::Interest strictInterest(futureWFnameAndHash);
-    strictInterest.setCanBePrefix(false); // Forces an exact name match in the CS
-
-    //auto csEntry = m_cs.find(*static_cast<const ndn::Interest*>(&strictInterest));
-    bool isCachedAndFresh = false;
-    m_cs.find(strictInterest,
-        [&](const Interest& i, const Data& cachedData) {
-            // --- CONTENT STORE HIT ---
-            // This block runs if an exact match exists and satisfies your criteria
-            isCachedAndFresh = true;
-            NFD_LOG_INFO("Custom CS Check: Found fresh data packet for " << i.getName());
-        },
-        [&](const Interest& i) {
-            // --- CONTENT STORE MISS ---
-            // This block runs if the data is missing or stale
-            isCachedAndFresh = false;
-            NFD_LOG_INFO("Custom CS Check: Data missing or stale for " << i.getName());
-        }
-    );
-
-
-    if (isCachedAndFresh)
+    if (prefixNameString == "/nesco")
     {
-      // respond with SD data packet and an EFT that represents zero computation time.
-      // this will involve updating the tracker data structure, and perhaps marking all the faceOUT interests are received??
-      NFD_LOG_DEBUG("NFDServiceDiscovery - content store entry for " << futureWFnameAndHashString << " is not stale! Responding with data packet containing EFT with zero computation.");
+      // look at content store. If WF results are cached and are still fresh, then respond with SD data packet and an EFT that represents zero computation time.
+      ndn::Interest strictInterest(futureWFnameAndHash);
+      strictInterest.setCanBePrefix(false); // Forces an exact name match in the CS
 
-      int64_t cachedResultsEFT = timeNowNS + WFstartTimeNS - SDstartTimeNS;
+      //auto csEntry = m_cs.find(*static_cast<const ndn::Interest*>(&strictInterest));
+      bool isCachedAndFresh = false;
+      m_cs.find(strictInterest,
+          [&](const Interest& i, const Data& cachedData) {
+              // --- CONTENT STORE HIT ---
+              // This block runs if an exact match exists and satisfies your criteria
+              isCachedAndFresh = true;
+              NFD_LOG_INFO("Custom CS Check: Found fresh data packet for " << i.getName());
+          },
+          [&](const Interest& i) {
+              // --- CONTENT STORE MISS ---
+              // This block runs if the data is missing or stale
+              isCachedAndFresh = false;
+              NFD_LOG_INFO("Custom CS Check: Data missing or stale for " << i.getName());
+          }
+      );
 
-      std::string fullNameForResponse = prefixNameString + serviceDiscoveryNameString + rxedInterestNameAndHash;
-      NFD_LOG_DEBUG("NFDServiceDiscovery - calling sendEFTdataUpdateFromCache with fullNameForResponse=" << fullNameForResponse << " and cachedResultsEFT=" << cachedResultsEFT);
-      this->sendEFTdataUpdateFromCache(fullNameForResponse, cachedResultsEFT, ingress);
-
-      for (auto& faceOutIterator : m_SDservTracker[rxedInterestNameAndHash]["faceOUT"].items())
+      if (isCachedAndFresh)
       {
-        m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["intTx"] = 0;
-        m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] = 0;
-        m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["linkDelay"] = -1;
-        m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"] = -1;
+        // respond with SD data packet and an EFT that represents zero computation time.
+        // this will involve updating the tracker data structure, and perhaps marking all the faceOUT interests are received??
+        NFD_LOG_DEBUG("NFDServiceDiscovery - content store entry for " << futureWFnameAndHashString << " is not stale! Responding with data packet containing EFT with zero computation.");
+
+        int64_t cachedResultsEFT = timeNowNS + WFstartTimeNS - SDstartTimeNS;
+
+        std::string fullNameForResponse = prefixNameString + serviceDiscoveryNameString + rxedInterestNameAndHash;
+        NFD_LOG_DEBUG("NFDServiceDiscovery - calling sendEFTdataUpdateFromCache with fullNameForResponse=" << fullNameForResponse << " and cachedResultsEFT=" << cachedResultsEFT);
+        this->sendEFTdataUpdateFromCache(fullNameForResponse, cachedResultsEFT, ingress);
+
+        for (auto& faceOutIterator : m_SDservTracker[rxedInterestNameAndHash]["faceOUT"].items())
+        {
+          m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["intTx"] = 0;
+          m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] = 0;
+          m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["linkDelay"] = -1;
+          m_SDservTracker[rxedInterestNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"] = -1;
+        }
+
+        return;
       }
 
-      return;
-    }
+
 
 /*
     //if (csEntry != nullptr) {
@@ -792,7 +795,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
       if (!isStale)
       {
-        //TODO: respond with SD data packet and an EFT that represents zero computation time.
+        // respond with SD data packet and an EFT that represents zero computation time.
         // this will involve updating the tracker data structure, and perhaps marking all the faceOUT interests are received??
         NFD_LOG_DEBUG("NFDServiceDiscovery - content store entry for " << futureWFnameAndHashString << " is not stale! Responding with data packet containing EFT with zero computation.");
 
@@ -808,6 +811,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     //}
 */
 
+    }
 
 
 
@@ -1007,44 +1011,39 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
       bool useRegularRouting = false;
       std::string currentService = dagObject["head"];
       std::string nextService = "";
-      std::string sinkService = "";
+      std::string rootService = "";
+      
+      NFD_LOG_DEBUG("ICN-FC ingress face was: " << ingress.face.getId());
 
 
-      nfd::FaceId currentLowestCostFaceId = 0;
-      nfd::FaceId prevLowestCostFaceId = 0;
-      bool hasPrevFace = false;
+      // candidate faces: the intersection of all next-hop face sets across the M evaluated services.
+      // A face in this set can reach every evaluated upstream service, making it a valid shortcut.
+      std::set<nfd::FaceId> candidateFaces;
+      std::vector<std::pair<uint64_t, nfd::FaceId>> headHopsByCost; // (cost, faceId) for head service, sorted ascending by cost
+      bool firstService = true;
 
-      // find the sink service
+      // find the root service: the service not fed by any other service in the dag (no incoming edges).
+      // x.key() feeds y.key(), so the root is the x.key() that never appears as a y.key() of anyone.
+      // Since icnfc only supports linear workflows, there will only be one.
       for (auto& x : dagObject["dag"].items())
       {
-        for (auto& y : dagObject["dag"][x.key()].items())
+        bool appearsAsChild = false;
+        for (auto& x2 : dagObject["dag"].items())
         {
-          // y.key() is the next downstream service. If it doesn't exist as a top-level key in the DAG, it's the sink!
-/*
-          bool dependentFound = false;
-          for (auto& x2 : dagObject["dag"].items())
+          if (dagObject["dag"][x2.key()].contains(x.key()))
           {
-            if (y.key() == x2.key())
-            {
-              dependentFound = true;
-              break;
-            }
-          }
-          if (!dependentFound)
-          {
-            sinkService = y.key();
-          }
-*/
-          if (!dagObject["dag"].contains(y.key()))
-          {
-            sinkService = y.key();
+            appearsAsChild = true;
             break;
           }
         }
-        if (!sinkService.empty()) {
-          break; // Found the unique sink, exit outer loop
+        if (!appearsAsChild)
+        {
+          rootService = x.key();
+          break;
         }
       }
+      //NFD_LOG_DEBUG("ICN-FC root service found in pDAG: " << rootService);
+
 
       bool doneSearching = false;
       while (!doneSearching)
@@ -1088,6 +1087,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
         }
 */
 
+        NFD_LOG_DEBUG("ICN-FC currently evaluating face for service: " << currentService);
         // Performance Optimization: Construct the precise NDN Name and let NFD find it instantly instead of doing an expensive O(N) full-table loop scan.
         ndn::Name targetPrefix(prefixNameString);
         targetPrefix.append(currentService);
@@ -1096,62 +1096,97 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
         if (fibEntry != nullptr && fibEntry->hasNextHops())
         {
           const fib::NextHopList& hopList = fibEntry->getNextHops();
-          
+
           // debug loop
           for (auto hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
           {
-            NFD_LOG_DEBUG("CABEEEfibEntries: interest " << fibEntry->getPrefix().toUri() 
-                          << ", faceID: " << hop_iterator->getFace().getId() 
+            NFD_LOG_DEBUG("CABEEEfibEntries: interest " << fibEntry->getPrefix().toUri()
+                          << ", faceID: " << hop_iterator->getFace().getId()
                           << ", cost: " << hop_iterator->getCost());
           }
 
-          currentLowestCostFaceId = hopList.front().getFace().getId();
+          if (firstService)
+          {
+            //TODO: make sure that if the currentService is available locally, we just use that local face no matter what, without looking at parameter M.
+            if(hopList.front().getFace().getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+            {
+              useRegularRouting = true;
+              NFD_LOG_DEBUG("ICN-FC current [first] service is available on local face. Using regular routing so this local face is chosen.");
+              break;
+            }
+
+            // seed candidate set with all faces reachable for the head service.
+            // also record (cost, faceId) in cost order so we can pick lowest-cost candidate later.
+            // hopList is already sorted ascending by cost by NFD.
+            for (const auto& hop : hopList)
+            {
+              if (hop.getFace().getId() != ingress.face.getId()) // don't consider the ingress face to avoid loops
+              {
+                candidateFaces.insert(hop.getFace().getId());
+                headHopsByCost.push_back({hop.getCost(), hop.getFace().getId()});
+              }
+            }
+            firstService = false;
+            NFD_LOG_DEBUG("ICN-FC head service=" << currentService << " candidate faces initialized: " << candidateFaces.size());
+          }
+          else
+          {
+            // intersect: keep only faces that also reach this upstream service
+            std::set<nfd::FaceId> serviceFaces;
+            for (const auto& hop : hopList)
+              serviceFaces.insert(hop.getFace().getId());
+
+            std::set<nfd::FaceId> intersection;
+            for (auto faceId : candidateFaces)
+            {
+              if (serviceFaces.count(faceId))
+                intersection.insert(faceId);
+            }
+            candidateFaces = intersection;
+            NFD_LOG_DEBUG("ICN-FC service=" << currentService << " candidate faces after intersection: " << candidateFaces.size());
+          }
+
           fibEntryFound = true;
         }
-
-
-
-
+        for (auto faceId : candidateFaces)
+          NFD_LOG_DEBUG("ICN-FC candidate faceID: " << faceId);
 
         // If the service isn't in our routing table, drop down to standard routing safely without crashing
         if (!fibEntryFound)
         {
           useRegularRouting = true;
+          NFD_LOG_DEBUG("ICN-FC fib entry not found for service=" << currentService << ", using regular routing");
           break;
         }
 
-        if (currentService == dagObject["head"])
-        {
-          prevLowestCostFaceId = currentLowestCostFaceId;
-          hasPrevFace = true;
-        }
-        else if (hasPrevFace && currentLowestCostFaceId != prevLowestCostFaceId)
+        // If no common face remains, the M services are not all reachable via one face
+        if (candidateFaces.empty())
         {
           useRegularRouting = true;
+          NFD_LOG_DEBUG("ICN-FC no common face across services, using regular routing");
           doneSearching = true;
+          break;
         }
-        prevLowestCostFaceId = currentLowestCostFaceId;
 
-        // find what service in the DAG is the next downstream service
-        // if we already reached M services, or reached the sink service, then exit loop
+        // traverse upstream: find the service that feeds currentService (reverse DAG traversal).
+        // if we already reached M services, or reached the root service, then exit loop
         parameterM--;
-        if (parameterM == 0 || currentService == sinkService)
+        NFD_LOG_DEBUG("ICN-FC parameterM remaining: " << parameterM);
+        if (parameterM == 0 || currentService == rootService)
         {
           doneSearching = true;
+          break;
         }
         else
         {
           nextService = ""; // clear state to prevent cross-iteration leaks
           for (auto& x : dagObject["dag"].items())
           {
-            //std::cout << "Checking x.key: " << (std::string)x.key() << '\n';
-            if (x.key() == currentService)
+            if (dagObject["dag"][x.key()].contains(currentService))
             {
-              for (auto& y : dagObject["dag"][x.key()].items())
-              {
-                //std::cout << "Checking y.key: " << (std::string)y.key() << '\n';
-                nextService = y.key();
-              }
+              nextService = x.key(); // x feeds currentService, so x is the next upstream service
+              NFD_LOG_DEBUG("ICN-FC next upstream service that will be evaluated: " << nextService);
+              break; // linear DAG guaranteed: only one upstream service
             }
           }
           if (nextService.empty())
@@ -1167,30 +1202,127 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
       } // end while (!doneSearching)
 
-      if (!useRegularRouting)
+      if (!useRegularRouting && !candidateFaces.empty())
       {
-        // create new FIB entry
-        NFD_LOG_DEBUG("NFD Forwarder, ICN-FC try to add FIB entry.");
+        // All M upstream services are reachable via every face in candidateFaces.
+        // Pick the lowest-cost face for the head service that is still in the candidate set.
+        nfd::FaceId chosenFaceId = *candidateFaces.begin(); // fallback: lowest FaceId
+        for (const auto& [cost, faceId] : headHopsByCost)
+        {
+          if (candidateFaces.count(faceId))
+          {
+            chosenFaceId = faceId;
+            break; // headHopsByCost is sorted ascending by cost, so first hit is lowest cost
+          }
+        }
         fib::Entry* entry = m_fib.insert(interest.getName()).first;
-        Face* upstreamFace;
+        Face* upstreamFace = nullptr;
         for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
         {
-          upstreamFace = &*it;
-          if (upstreamFace->getId() == currentLowestCostFaceId)
+          if (it->getId() == chosenFaceId)
           {
+            upstreamFace = &*it;
             break;
           }
         }
-        m_fib.addOrUpdateNextHop(*entry, *upstreamFace, 99);
+        if (upstreamFace != nullptr)
+        {
+          NFD_LOG_DEBUG("ICN-FC selected face=" << upstreamFace->getId() << " for full name=" << entry->getPrefix());
+          m_fib.addOrUpdateNextHop(*entry, *upstreamFace, 99);
+        }
+      }
+      else
+      {
+        // Regular routing will be used; remove any stale ICN-FC FIB entry for this exact name+hash
+        // so the normal FIB lookup picks the right next hop instead of a cached shortcut.
+        m_fib.erase(interest.getName());
+        NFD_LOG_DEBUG("ICN-FC useRegularRouting=true, erased FIB entry for " << interest.getName());
       }
 
     } // end prefixNameString == icnfc
 
 
+
+
     if (prefixNameString == "/ndnfcp")
     {
-      //TODO: if ndnfcp, find upstreamFace based on weighted calculation betwee next service's hop count and how many times that service has been called in past T seconds.
-      NFD_LOG_DEBUG("NFD Forwarder, NDN-FC+ yet to be implemented.");
+      // T value in milliseconds: how far back to count service calls per face
+      uint64_t ndnfcpTMS = 500;
+      int64_t windowNS = (int64_t)ndnfcpTMS * 1000000;
+      int64_t currentTimeNS = (int64_t)ns3::Simulator::Now().ToInteger(ns3::Time::NS);
+      int64_t cutoffTimeNS = currentTimeNS - windowNS;
+
+      // Weighted forwarding: select upstream face using hop cost + recent call frequency per face.
+      // The call history is populated from callTimestamp fields in returning data packets (see onIncomingData).
+      auto dagParameterFromInterest = interest.getApplicationParameters();
+      std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
+      json dagObject = json::parse(dagString);
+      std::string headService = dagObject["head"];
+
+      ndn::Name targetPrefix("/ndnfcp");
+      targetPrefix.append(headService);
+      fib::Entry* fibEntry = m_fib.findExactMatch(targetPrefix);
+
+      if (fibEntry != nullptr && fibEntry->hasNextHops())
+      {
+        const fib::NextHopList& hopList = fibEntry->getNextHops();
+
+        nfd::FaceId bestFaceId = hopList.front().getFace().getId();
+        double bestScore = std::numeric_limits<double>::max();
+
+        for (const auto& hop : hopList)
+        {
+          nfd::FaceId faceId = hop.getFace().getId();
+          uint64_t hopCost = hop.getCost();
+
+          // Count how many times this service was called via this face within the window
+          int64_t callCount = 0;
+          std::string serviceKey = "/" + headService;
+          auto serviceIt = m_ndnfcpCallHistory.find(serviceKey);
+          if (serviceIt != m_ndnfcpCallHistory.end())
+          {
+            auto faceIt = serviceIt->second.find(faceId);
+            if (faceIt != serviceIt->second.end())
+            {
+              for (int64_t ts : faceIt->second)
+              {
+                if (ts >= cutoffTimeNS)
+                  callCount++;
+              }
+            }
+          }
+
+          // score = hopCost + callCount: prefer nearer and less-loaded faces
+          double alpha = 0.5;
+          double beta = 0.5;
+          double score = alpha*hopCost + beta*callCount;
+          NFD_LOG_DEBUG("NDN-FC+ face=" << faceId << " hopCost=" << hopCost << " callCount=" << callCount << " score=" << score);
+NFD_LOG_INFO("NDN-FC+ face=" << faceId << " hopCost=" << hopCost << " callCount=" << callCount << " score=" << score);
+
+          if (score < bestScore)
+          {
+            bestScore = score;
+            bestFaceId = faceId;
+          }
+        }
+
+        NFD_LOG_DEBUG("NDN-FC+ selected face=" << bestFaceId << " score=" << bestScore << " for service=" << headService);
+NFD_LOG_INFO("NDN-FC+ selected face=" << bestFaceId << " score=" << bestScore << " for service=" << headService);
+        fib::Entry* entry = m_fib.insert(interest.getName()).first;
+        Face* bestFace = nullptr;
+        for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+        {
+          bestFace = &*it;
+          if (bestFace->getId() == bestFaceId)
+            break;
+        }
+        if (bestFace != nullptr)
+        {
+NFD_LOG_INFO("NDN-FC+ selected face=" << bestFaceId << " score=" << bestScore << " for full name =" << entry->getPrefix());
+          m_fib.addOrUpdateNextHop(*entry, *bestFace, 99);
+        }
+      }
+      // else: no FIB entry found, fall through to regular routing
     }
 
 
@@ -2061,7 +2193,7 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       // iterate through ALL items for the WF name and hash, not the SD name and hash
       // technically, we should have never generated more interests for the same WF name and hash request coming in from a different path. Any subsequent requests to this node should have been ignored, so these
       // extra SD name and hash entries would not exist, and the code below should be sufficient.
-      //TODO: extract consumer name from the data name (/nesco/sd2/service/consumerX)
+      // we extract the consumer name from the data name (/nesco/sd2/service/consumerX)
       std::string consumerName = data.getName().getPrefix(-1).getSubName(4,1).toUri(); // get rid of param digest, then starting at component 4, keep 1 component
       for (auto& serviceIterator : m_SDservTracker.items())
       {
@@ -3062,8 +3194,21 @@ m_FibOwnerTracker = {
   else // regular data packet processing
   {
 
+    if (prefixNameString == "/ndnfcp")
+    {
+      // Record the callTimestamp from this data packet in the per-face call history.
+      // name1String = "/serviceA" (component 1 of /ndnfcp/serviceA/<hash>)
+      // This is used by onIncomingInterest to count recent calls per face for weighted forwarding.
+      std::string dataPacketString;
+      dataPacketString = (const char *)data.getContent().value();
+      json dataPacketContents = json::parse(dataPacketString);
+      int64_t callTimestamp = dataPacketContents["callTimestamp"];
+      m_ndnfcpCallHistory[name1String][ingress.face.getId()].push_back(callTimestamp);
+      NFD_LOG_DEBUG("NDN-FC+ recorded callTimestamp=" << callTimestamp << " for service=" << name1String << " on faceID=" << ingress.face.getId());
+NFD_LOG_INFO("NDN-FC+ recorded callTimestamp=" << callTimestamp << " for service=" << name1String << " on faceID=" << ingress.face.getId());
+    }
 
-    // CPU ALLOCATION CHECK
+    // CPU ADD TO QUEUE
     if (prefixNameString == "/nesco" ||
         prefixNameString == "/nescoSCOPT" ||
         prefixNameString == "/orchA" ||

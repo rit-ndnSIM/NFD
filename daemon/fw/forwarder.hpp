@@ -42,6 +42,9 @@
 #include <mutex>
 #include <queue>
 #include <memory>
+#include <map>
+#include <vector>
+#include <set>
 
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
@@ -359,6 +362,7 @@ private:
   NetworkRegionTable m_networkRegionTable;
   shared_ptr<Face>   m_csFace;
   json m_SDservTracker; // with this data structure, we can keep track of WHICH SD data packets have arrived, the faces (downstream and upstream), the EFT, upstream link delay, as well as service scheduling.
+  std::map<std::string, std::map<nfd::FaceId, std::vector<int64_t>>> m_ndnfcpCallHistory; // m_ndnfcpCallHistory["/serviceName"][faceId] = list of callTimestamps (ns) for NDN-FC+ per-face call frequency
   json m_FibOwnerTracker; // with this data structure, we can keep track of WHICH SD unique path name owns the true FIB entry so that we can remove the FIB entry once no one owns it. (multiple SD unique path names can be related to the same FIB entry, but only one is the optimal one that actually owns it)
   std::mutex m_interestMutex;  // mutex to account for interest processing (can only process one interest at a time)
   bool m_interestBusy;  // mutex to account for interest processing (can only process one interest at a time)
