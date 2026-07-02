@@ -50,6 +50,7 @@ using json = nlohmann::json;
 #include <queue>
 #include <memory>
 #include <limits>
+#include <algorithm>
 
 namespace nfd {
 
@@ -1107,7 +1108,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
           if (firstService)
           {
-            //TODO: make sure that if the currentService is available locally, we just use that local face no matter what, without looking at parameter M.
+            // make sure that if the currentService is available locally, we just use that local face no matter what, without looking at parameter M.
             if(hopList.front().getFace().getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
             {
               useRegularRouting = true;
@@ -1274,21 +1275,37 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
         {
           nfd::FaceId faceId = hop.getFace().getId();
           uint64_t hopCost = hop.getCost();
+NFD_LOG_INFO("NDN-FC+ Analyzing face = " << faceId << " hopCost=" << hopCost);
 
           // Count how many times this service was called via this face within the window
           int64_t callCount = 0;
-          std::string serviceKey = "/" + headService;
+          std::string serviceKey = headService;
+NFD_LOG_INFO("NDN-FC+ Analyzing serviceKey = " << serviceKey);
+
+          // debug: print out the entries
+          for (const auto& [svc, faceMap] : m_ndnfcpCallHistory)
+          {
+            for (const auto& [fid, timestamps] : faceMap)
+            {
+              for (int64_t ts : timestamps)
+                NFD_LOG_INFO("NDN-FC+ callHistory: service=" << svc << " faceID=" << fid << " callTimestamp=" << ts);
+            }
+          }
+
+
           auto serviceIt = m_ndnfcpCallHistory.find(serviceKey);
           if (serviceIt != m_ndnfcpCallHistory.end())
           {
             auto faceIt = serviceIt->second.find(faceId);
             if (faceIt != serviceIt->second.end())
             {
-              for (int64_t ts : faceIt->second)
-              {
-                if (ts >= cutoffTimeNS)
-                  callCount++;
-              }
+              // remove stale entries older than the window before counting
+              auto& ts_vec = faceIt->second;
+              ts_vec.erase(std::remove_if(ts_vec.begin(), ts_vec.end(),
+                           [cutoffTimeNS](int64_t ts){ return ts < cutoffTimeNS; }),
+                           ts_vec.end());
+
+              callCount = (int64_t)ts_vec.size();
             }
           }
 
@@ -3203,9 +3220,17 @@ m_FibOwnerTracker = {
       dataPacketString = (const char *)data.getContent().value();
       json dataPacketContents = json::parse(dataPacketString);
       int64_t callTimestamp = dataPacketContents["callTimestamp"];
-      m_ndnfcpCallHistory[name1String][ingress.face.getId()].push_back(callTimestamp);
-      NFD_LOG_DEBUG("NDN-FC+ recorded callTimestamp=" << callTimestamp << " for service=" << name1String << " on faceID=" << ingress.face.getId());
-NFD_LOG_INFO("NDN-FC+ recorded callTimestamp=" << callTimestamp << " for service=" << name1String << " on faceID=" << ingress.face.getId());
+      auto& timestamps = m_ndnfcpCallHistory[name1String][ingress.face.getId()];
+      bool isDuplicate = (std::find(timestamps.begin(), timestamps.end(), callTimestamp) != timestamps.end());
+      if (!isDuplicate)
+      {
+        timestamps.push_back(callTimestamp);
+        NFD_LOG_INFO("NDN-FC+ recorded callTimestamp=" << callTimestamp << " for service=" << name1String << " on faceID=" << ingress.face.getId());
+      }
+      else
+      {
+        NFD_LOG_INFO("NDN-FC+ skipped duplicate callTimestamp=" << callTimestamp << " for service=" << name1String << " on faceID=" << ingress.face.getId());
+      }
     }
 
     // CPU ADD TO QUEUE
