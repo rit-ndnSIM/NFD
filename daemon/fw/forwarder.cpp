@@ -344,6 +344,8 @@ Forwarder::doneProcessingIncomingInterestMutex(const Interest& interest, const F
 */
 
 
+
+
 void
 Forwarder::processIncomingInterest(const Interest& interest, const FaceEndpoint& ingress)
 {
@@ -418,43 +420,6 @@ int64_t timeNowNS = timeNow.ToInteger(ns3::Time::NS); // extract the time in nan
 
 if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (after the workflow has started)
 //NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Interest): " << std::setw(2) << m_SDservTracker << '\n');
-
-  // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
-  if (prefixNameString == "/nesco")
-  {
-    for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
-    {
-      //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
-      ndn::Name entryName;
-      entryName = fib_iterator->getPrefix();
-      entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
-      std::string entryString = entryName.toUri();
-
-      auto dagParameterFromInterest = interest.getApplicationParameters();
-      std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
-      json dagObject = json::parse(dagString);
-      ndn::Name serviceName;
-      serviceName = fib_iterator->getPrefix();
-      serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
-      std::string serviceString = serviceName.toUri();
-
-      // only print FIB entries if this interest is for this fib iterator
-      //if (entryString == "/nesco" && serviceString == dagObject["head"])
-      if (entryString == "/nesco")
-      {
-        if (fib_iterator->hasNextHops())
-        {
-          // figure out the faceID of all the nexthops in the list, and print them
-          const fib::NextHopList& hopList = fib_iterator->getNextHops();
-          for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
-          {
-            NFD_LOG_INFO("CABEEEfibEntries: interest " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
-          }
-        }
-      }
-    }
-  }
-
 }
 */
 
@@ -586,9 +551,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     //NFD_LOG_DEBUG("NFDServiceDiscovery received an interest on face " << ingress.face.getId() << " that needs to be distributed to other faces.\n");
     NFD_LOG_DEBUG("NFDServiceDiscovery received interest has name: " << rxedInterestNameAndHash << " - faceID is: " << ingress.face.getId());
 
-
-    auto faceInId = ingress.face.getId();
-    std::string faceInIdString = std::to_string(faceInId);
+    //this->printFibEntriesForPrefix(prefixNameString);
 
     // Modify application parameters to add faceIN (downstream face), so we know which interest is being satisfied later when the data packet arrives (this changes the name hash! so it's unique)
     auto dagParameterFromInterest = interest.getApplicationParameters();
@@ -596,6 +559,30 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     json dagObject = json::parse(dagString);
 
     NFD_LOG_DEBUG("NFDServiceDiscovery received interest with name " << rxedInterestNameAndHash << " where prev name&hash was " << dagObject["prevHash"]);
+
+
+    //TODO: check interestGenerationTimestamp. If we have already received an interest for the same service and timestamp, then simply respond with infinite EFT and do NOTHING ELSE (return)
+    //TODO: will need to create a way to keep track of which ones have arrived.
+    uint64_t interestGenerationTimestampNS = dagObject["interestGenerationTimestamp"];
+    for (const auto& record : m_receivedInterests)
+    {
+      if (simpleName.toUri() == record.serviceName && interestGenerationTimestampNS == record.interestGenerationTimestampNS)
+      {
+        NFD_LOG_DEBUG("NFDServiceDiscovery has already received this interest before: " << simpleName.toUri() << " - generated at time: " << interestGenerationTimestampNS << ". Responding with infinite EFT.");
+        std::string fullNameForResponse = prefixNameString + serviceDiscoveryNameString + rxedInterestNameAndHash;
+        uint64_t infiniteEFT = std::numeric_limits<uint64_t>::max();
+        this->sendEFTdataUpdateFromCache(fullNameForResponse, infiniteEFT, ingress);
+        return;
+      }
+    }
+    // record this interest so future duplicates are caught.
+    m_receivedInterests.push_back({simpleName.toUri(), interestGenerationTimestampNS});
+
+
+
+
+    auto faceInId = ingress.face.getId();
+    std::string faceInIdString = std::to_string(faceInId);
 
     dagObject["faceIN"] = faceInIdString;
     dagObject["prevHash"] = rxedInterestNameAndHash; // adding the previous name&hash add the full "historical" path of where the interest has come from, trying to make it unique, although faces may have same ID on different nodes.
@@ -1057,10 +1044,10 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
         for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
         {
           //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
-          ndn::Name entryName;
-          entryName = fib_iterator->getPrefix();
-          entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (prefix only)
-          std::string entryString = entryName.toUri();
+          ndn::Name entryPrefix;
+          entryPrefix = fib_iterator->getPrefix();
+          entryPrefix = entryPrefix.getSubName(0,1); // starting at component 0, get 1 component (prefix only)
+          std::string entryPrefixString = entryPrefix.toUri();
 
           ndn::Name serviceName;
           serviceName = fib_iterator->getPrefix();
@@ -1069,7 +1056,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
 
           // only look at FIB entries if the fib iterator is for the next downstream service
-          if (entryString == prefixNameString && serviceString == currentService)
+          if (entryPrefixString == prefixNameString && serviceString == currentService)
           {
             if (fib_iterator->hasNextHops())
             {
@@ -1608,42 +1595,6 @@ Forwarder::onContentStoreMiss(const Interest& interest, const FaceEndpoint& ingr
   std::string prefixNameString = prefixName.toUri();
   
 
-/*
-  // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
-  if (prefixNameString == "/nesco")
-  {
-    for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
-    {
-      //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
-      ndn::Name entryName;
-      entryName = fib_iterator->getPrefix();
-      entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
-      std::string entryString = entryName.toUri();
-
-      auto dagParameterFromInterest = interest.getApplicationParameters();
-      std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
-      json dagObject = json::parse(dagString);
-      ndn::Name serviceName;
-      serviceName = fib_iterator->getPrefix();
-      serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
-      std::string serviceString = serviceName.toUri();
-
-      // only print FIB entries if this interest is for this fib iterator
-      if (entryString == "/nesco" && serviceString == dagObject["head"])
-      {
-        if (fib_iterator->hasNextHops())
-        {
-          // figure out the faceID of all the nexthops in the list, and print them
-          const fib::NextHopList& hopList = fib_iterator->getNextHops();
-          for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
-          {
-            NFD_LOG_DEBUG("CABEEEfibEntries: interest " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
-          }
-        }
-      }
-    }
-  }
-*/
 
 
 
@@ -1833,35 +1784,7 @@ Forwarder::sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint
     //NFD_LOG_DEBUG("CABEEEshortcutOPT, sending /shortcutOPT interest to apps on local faces to generate new interests for inputs into locally hosted services.");
 
 
-
-/*
-    // PRINT FIB ENTRIES
-    for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
-    {
-      auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
-      //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
-      ndn::Name entryName;
-      entryName = fib_iterator->getPrefix();
-      entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
-      std::string entryString = entryName.toUri();
-
-      ndn::Name serviceName;
-      serviceName = fib_iterator->getPrefix();
-      serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
-      std::string serviceString = serviceName.toUri();
-      NFD_LOG_DEBUG((*node).GetId() << " <--nodeID. CABEEEshortcutOPT, fib entry name is "<< entryString << serviceString);
-
-        if (fib_iterator->hasNextHops())
-        {
-          // figure out the faceID of all the nexthops in the list, and send interest to ones that are local
-          const fib::NextHopList& hopList = fib_iterator->getNextHops();
-          for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
-          {
-            NFD_LOG_DEBUG("     CABEEEshortcutOPT, looking at all hops for this fib entry, hop_iterator: " << hop_iterator->getFace().getId());
-          }
-        }
-    }
-*/
+    //this->printFibEntriesForPrefix(prefixnamestring);
 
 
     // look at FIB, and see if any UPSTREAM services are hosted on a local face (upstream only, since we received a pruned dag, so upstream is all we know about).
@@ -1869,11 +1792,11 @@ Forwarder::sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint
     for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
     {
       //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
-      ndn::Name entryName;
-      entryName = fib_iterator->getPrefix();
-      entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
-      std::string entryString = entryName.toUri();
-      //NFD_LOG_DEBUG("CABEEEshortcutOPT, fib entry name component 0 is "<< entryString);
+      ndn::Name entryPrefix;
+      entryPrefix = fib_iterator->getPrefix();
+      entryPrefix = entryPrefix.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
+      std::string entryPrefixString = entryPrefix.toUri();
+      //NFD_LOG_DEBUG("CABEEEshortcutOPT, fib entry name component 0 is "<< entryPrefixString);
 
       auto dagParameterFromInterest = interest.getApplicationParameters();
       std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
@@ -1894,9 +1817,9 @@ Forwarder::sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint
 
 
       // only generate shorcutOPT interest if the incoming interest is for /nescoSCOPT, and this fib entry is not for the service the interest is for (in which case the interest is forwarded to the service normally later on), and the service we'd be generating an interest for is upstream in the pruned DAG we received. Hosted services from other branches are not dealt with in shortcutOPT.
-      //if (entryString == "/nescoSCOPT" && serviceString != dagObject["head"])
-      //if (entryString == "/nescoSCOPT" && serviceString != dagObject["head"] && prunedDagObject["dag"].contains(serviceString))
-      if (entryString == "/nescoSCOPT" && serviceString != dagObject["head"] && dagObject["dag"].contains(serviceString))
+      //if (entryPrefixString == "/nescoSCOPT" && serviceString != dagObject["head"])
+      //if (entryPrefixString == "/nescoSCOPT" && serviceString != dagObject["head"] && prunedDagObject["dag"].contains(serviceString))
+      if (entryPrefixString == "/nescoSCOPT" && serviceString != dagObject["head"] && dagObject["dag"].contains(serviceString))
       {
 //auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
 //NFD_LOG_DEBUG("NodeID is " << (*node).GetId());
@@ -1939,6 +1862,73 @@ Forwarder::sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint
     // TODO: iterate through queue, and send out the best ranked ones
   }
 }
+
+
+
+void
+Forwarder::printFibEntriesForPrefix(std::string prefixToPrint)
+{
+ // PRINT OUT THE FIB ENTRIES FOR ALL NAMES - for debugging
+  for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+  {
+    ndn::Name entryPrefix;
+    entryPrefix = fib_iterator->getPrefix();
+    entryPrefix = entryPrefix.getSubName(0,1); // starting at component 0, get 1 component (/nesco only)
+    std::string entryPrefixString = entryPrefix.toUri();
+
+    ndn::Name serviceName;
+    serviceName = fib_iterator->getPrefix();
+    serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
+    std::string serviceString = serviceName.toUri();
+
+    if (entryPrefixString == prefixToPrint)
+    {
+      if (fib_iterator->hasNextHops())
+      {
+        // figure out the faceID of all the nexthops in the list, and print them
+        const fib::NextHopList& hopList = fib_iterator->getNextHops();
+        for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+        {
+          NFD_LOG_DEBUG("CABEEEfibEntries: name " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
+        }
+      }
+    }
+  }
+}
+
+void
+Forwarder::printFibEntriesForName(std::string prefixToPrint, std::string nameToPrint)
+{
+  // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
+  for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
+  {
+    ndn::Name entryPrefix;
+    entryPrefix = fib_iterator->getPrefix();
+    entryPrefix = entryPrefix.getSubName(0,1); // starting at component 0, get 1 component (/nesco only)
+    std::string entryPrefixString = entryPrefix.toUri();
+
+    ndn::Name serviceName;
+    serviceName = fib_iterator->getPrefix();
+    serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
+    std::string serviceString = serviceName.toUri();
+
+    // only print FIB entries if this interest is for this fib iterator
+    if (entryPrefixString == prefixToPrint && serviceString == nameToPrint)
+    {
+      if (fib_iterator->hasNextHops())
+      {
+        // figure out the faceID of all the nexthops in the list, and print them
+        const fib::NextHopList& hopList = fib_iterator->getNextHops();
+        for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
+        {
+          NFD_LOG_DEBUG("CABEEEfibEntries: interest " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
+        }
+      }
+    }
+  }
+}
+
+
 
 void
 Forwarder::onContentStoreHit(const Interest& interest, const FaceEndpoint& ingress,
@@ -2064,11 +2054,11 @@ Forwarder::sendCsUpdateInterest(const Data& data)
     for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
     {
       //NFD_LOG_DEBUG("cabeee csUpdate, looking at fib entry\n");
-      ndn::Name entryName;
-      entryName = fib_iterator->getPrefix();
-      entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nesco only)
-      std::string entryString = entryName.toUri();
-      //NFD_LOG_DEBUG("cabeee csUpdate, fib entry name component 0 is "<< entryString);
+      ndn::Name entryPrefix;
+      entryPrefix = fib_iterator->getPrefix();
+      entryPrefix = entryPrefix.getSubName(0,1); // starting at component 0, get 1 component (/nesco only)
+      std::string entryPrefixString = entryPrefix.toUri();
+      //NFD_LOG_DEBUG("cabeee csUpdate, fib entry name component 0 is "<< entryPrefixString);
 
       auto dagParameterFromInterest = interest.getApplicationParameters();
       std::string dagString = std::string(reinterpret_cast<const char*>(dagParameterFromInterest.value()), dagParameterFromInterest.value_size());
@@ -2081,7 +2071,7 @@ Forwarder::sendCsUpdateInterest(const Data& data)
       //NFD_LOG_DEBUG("cabeee csUpdate, interest head is "<< dagObject["head"]);
 
       // only generate shorcutOPT interest if the incoming interest is for /nesco, and this fib entry is not for the service the interest is for (in which case the interest is forwarded to the service normally later on) 
-      if (entryString == "/nesco" && serviceString != dagObject["head"])
+      if (entryPrefixString == "/nesco" && serviceString != dagObject["head"])
       {
         //NFD_LOG_DEBUG("cabeee csUpdate, fib entry has nesco name, and entry service name is not dagObject head!\n");
         if (fib_iterator->hasNextHops())
@@ -2922,35 +2912,6 @@ m_FibOwnerTracker = {
 */
 
 
-/*
- // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
-  for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
-  {
-    //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
-    ndn::Name entryName;
-    entryName = fib_iterator->getPrefix();
-    entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
-    std::string entryString = entryName.toUri();
-
-    ndn::Name serviceName;
-    serviceName = fib_iterator->getPrefix();
-    serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
-    std::string serviceString = serviceName.toUri();
-
-    if (entryString == "/nesco")
-    {
-      if (fib_iterator->hasNextHops())
-      {
-        // figure out the faceID of all the nexthops in the list, and print them
-        const fib::NextHopList& hopList = fib_iterator->getNextHops();
-        for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
-        {
-          NFD_LOG_INFO("CABEEEfibEntries: name " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
-        }
-      }
-    }
-  }
-*/
 
 
       // make value of this specific rxedDataNameAndHash = lowestEFT
@@ -3129,41 +3090,9 @@ m_FibOwnerTracker = {
         m_fib.addOrUpdateNextHop(*entry, *lowestCostFace, lowestEFT);
       }
 
-
- // PRINT OUT THE FIB ENTRIES FOR THIS NAME - for debugging
-//if (futureWFnameAndHashString == "/nesco/service2/params-sha256=f92147a800084a98e24f354dcfc1d04bae6aa768fed9ca86f1d546d4dfa13387")
-//{
-  for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
-  {
-    //NFD_LOG_DEBUG("CABEEEshortcutOPT, looking at fib entry\n");
-    ndn::Name entryName;
-    entryName = fib_iterator->getPrefix();
-    entryName = entryName.getSubName(0,1); // starting at component 0, get 1 component (/nescoSCOPT only)
-    std::string entryString = entryName.toUri();
-
-    ndn::Name serviceName;
-    serviceName = fib_iterator->getPrefix();
-    serviceName = serviceName.getSubName(1,1); // starting at component 1, get 1 component (service name only)
-    std::string serviceString = serviceName.toUri();
-
-    if (entryString == "/nesco")
-    {
-      if (fib_iterator->hasNextHops())
-      {
-        // figure out the faceID of all the nexthops in the list, and print them
-        const fib::NextHopList& hopList = fib_iterator->getNextHops();
-        for (nfd::fib::NextHopList::const_iterator hop_iterator = hopList.begin(); hop_iterator != hopList.end(); ++hop_iterator)
-        {
-          NFD_LOG_INFO("CABEEEfibEntries: name " << fib_iterator->getPrefix().toUri() << ", faceID: " << hop_iterator->getFace().getId() << ", cost: " << hop_iterator->getCost());
-        }
-      }
-    }
-  }
-//}
-
-
 */
 
+      //this->printFibEntriesForPrefix(prefixNameString);
 
 
       this->sendEFTdataUpdate(rxedDataNameAndHash, lowestEFT);
