@@ -64,6 +64,7 @@ struct Service {
 struct ReceivedInterestRecord
 {
   std::string serviceName;
+  std::string consumerName;
   uint64_t interestGenerationTimestampNS;
 };
 
