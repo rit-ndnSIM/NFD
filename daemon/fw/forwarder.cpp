@@ -80,8 +80,8 @@ Forwarder::Forwarder(FaceTable& faceTable)
   m_faceTable.afterAdd.connect([this] (const Face& face) {
     face.afterReceiveInterest.connect(
       [this, &face] (const Interest& interest, const EndpointId& endpointId) {
-        //this->onIncomingInterest(interest, FaceEndpoint(const_cast<Face&>(face), endpointId));
-        this->processIncomingInterest(interest, FaceEndpoint(const_cast<Face&>(face), endpointId));
+        this->onIncomingInterest(interest, FaceEndpoint(const_cast<Face&>(face), endpointId));
+        //this->processIncomingInterest(interest, FaceEndpoint(const_cast<Face&>(face), endpointId));
         //this->processIncomingInterestMutex(interest, FaceEndpoint(const_cast<Face&>(face), endpointId));
       });
     face.afterReceiveData.connect(
@@ -354,6 +354,7 @@ Forwarder::processIncomingInterest(const Interest& interest, const FaceEndpoint&
 
   if (m_interestBusy) {
     // Resource is busy processing another interest, retry later
+    //TODO: if we end up using this mutex, reconsider the delay below. If there are many interests coming in (for example with service discovery), this REALLY slows down simulations
     ns3::Simulator::Schedule(ns3::MicroSeconds(1), &Forwarder::processIncomingInterest, this, *interestPtr, *ingressPtr);
     return;
   }
@@ -588,6 +589,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
     dagObject["faceIN"] = faceInIdString;
     dagObject["prevHash"] = rxedInterestNameAndHash; // adding the previous name&hash add the full "historical" path of where the interest has come from, trying to make it unique, although faces may have same ID on different nodes.
+    dagObject["consumerName"] = consumerName;
    
     ns3::Time timeNow;
     timeNow = ns3::Simulator::Now();
@@ -722,13 +724,13 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
               // --- CONTENT STORE HIT ---
               // This block runs if an exact match exists and satisfies your criteria
               isCachedAndFresh = true;
-              NFD_LOG_INFO("Custom CS Check: Found fresh data packet for " << i.getName());
+              NFD_LOG_DEBUG("Custom CS Check: Found fresh data packet for " << i.getName());
           },
           [&](const Interest& i) {
               // --- CONTENT STORE MISS ---
               // This block runs if the data is missing or stale
               isCachedAndFresh = false;
-              NFD_LOG_INFO("Custom CS Check: Data missing or stale for " << i.getName());
+              NFD_LOG_DEBUG("Custom CS Check: Data missing or stale for " << i.getName());
           }
       );
 
@@ -2329,7 +2331,6 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     int64_t linkDelayNS = linkDelay.ToInteger(ns3::Time::NS);
     std::string linkDelayStringNS = std::to_string(linkDelayNS);
     int64_t eftNS = newEFT.ToInteger(ns3::Time::NS);
-    std::string eftStringNS = std::to_string(eftNS);
     if (dataEFT == -1) // if the incoming EFT is invalid, then keep it invalid moving downstream, we don't consider this upstream path (not optimal)
     {
       eftNS = -1;
@@ -2492,6 +2493,7 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
         // Here we take into account the time taken to run the service, and add it to the EFT.
         // We just want to add the service latency to the EFT, assuming the service can start running right away.
         // This is simpler than below, where CPU allocation takes place (finding a gap to run the service). In that case, only 1 service can run at a time.
+        NFD_LOG_DEBUG("NFDServiceDiscovery, checking how long it will take to run the service locally, and adding that to the EFT.");
 
         // if the lowestEFT calculated above is from a local face, then we must calculate what the new EFT would be after scheduling the service in this node.
         Face* lowestCostFace;
@@ -2519,12 +2521,9 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
             uint64_t totalQueueMakespanNS = 0;
             if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceUtilization"] == 1) // if the flag is set, then we consider the resource utilization to calculate EFT. Otherwise, assumes node is fully available for computation at all times.
             {
-              // Create a copy so we don't destroy the original queue
-              std::queue<ResourceRequest> tempQueue = m_resourceQueue;
-              while (!tempQueue.empty())
+              for (const auto& req : m_resourceQueue)
               {
-                  totalQueueMakespanNS += tempQueue.front().makespanNS;
-                  tempQueue.pop(); // Remove from the temporary copy
+                  totalQueueMakespanNS += req.makespanNS;
               }
               NFD_LOG_DEBUG("Total makespan of all waiting services in the queue (size = " << m_resourceQueue.size() << "): " << totalQueueMakespanNS << " ns.");
             }
@@ -2548,6 +2547,8 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
         }
       }
 
+      NFD_LOG_DEBUG("NFDServiceDiscovery, finalized lowestEFT: " << lowestEFT);
+      NFD_LOG_DEBUG("NFDServiceDiscovery, finalized lowestFace: " << lowestFace);
 
 
       if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceAllocation"] == 1)
@@ -2995,6 +2996,10 @@ m_FibOwnerTracker = {
         }
 
       }
+      else
+      {
+        NFD_LOG_DEBUG("NFDServiceDiscovery - skipping generating FIB entry since lowest EFT is -1.");
+      }
 
 
 
@@ -3180,7 +3185,8 @@ m_FibOwnerTracker = {
         //NFD_LOG_DEBUG("Data received: " << dataPacketContents);
 
         uint64_t makespanNS = dataPacketContents["makespanNS"];
-        Forwarder::lockResourceQueueAdd(name1String, data, ingress, makespanNS);
+        //Forwarder::lockResourceQueueAdd(name1String, data, ingress, makespanNS);
+        Forwarder::lockResourceQueueAdd(data.getName().toUri(), data, ingress, makespanNS);
 
         return;
 
@@ -3400,8 +3406,8 @@ Forwarder::sendEFTdataUpdate(std::string nameAndHash, int64_t lowestEFT)
 
   std::string dataPacketString = dataPacketContents.dump();
   
-  //NFD_LOG_DEBUG("The data packet EFT (lowest) is " << lowestEFT);
-  //NFD_LOG_DEBUG("The data packet string is " << dataPacketString);
+  NFD_LOG_DEBUG("The data packet EFT (lowest) is " << lowestEFT);
+  NFD_LOG_DEBUG("The data packet string is " << dataPacketString);
 
   // instead of just writing a single value to the buffer, now we write the JSON data structure containing EFT and tx timestamp
   // write to the buffer, after making sure it's big enough
@@ -3689,7 +3695,7 @@ Forwarder::lockResourceQueueAdd(const std::string& serviceName, const Data& data
   {
     // mutex successfully locked here
     m_resourceBusy = true; // Acquire resource
-    NFD_LOG_INFO("NFDServiceDiscovery - WFresourceAllocation: Service " << serviceName << " started running on node " << (*node).GetId() << ". Setting resourceBusy = true (resource locked at " << timeNowNS << " nanoseconds).");
+    NFD_LOG_INFO("NFDForwarder - WFresourceAllocation: Service " << serviceName << " started running on node " << (*node).GetId() << ". Setting resourceBusy = true (resource locked at " << timeNowNS << " nanoseconds).");
     // Schedule release
     //ns3::Simulator::Schedule(ns3::MilliSeconds(1), &Forwarder::freeResource, this, serviceName, data, ingress);
     ns3::Simulator::Schedule(ns3::NanoSeconds(makespanNS), &Forwarder::freeResource, this, serviceName, *dataPtr, *ingressPtr);
@@ -3697,7 +3703,7 @@ Forwarder::lockResourceQueueAdd(const std::string& serviceName, const Data& data
   else
   {
     // Resource is busy, retry later
-    NFD_LOG_DEBUG("NFDServiceDiscovery - WFresourceAllocation: Service " << serviceName << " needs to start running on node " << (*node).GetId() << " but the node is busy running another service. Waiting 0.1ms and trying again. Current time: " << timeNowNS << " nanoseconds).");
+    NFD_LOG_DEBUG("NFDForwarder - WFresourceAllocation: Service " << serviceName << " needs to start running on node " << (*node).GetId() << " but the node is busy running another service. Waiting 0.1ms and trying again. Current time: " << timeNowNS << " nanoseconds).");
     //ns3::Simulator::Schedule(ns3::MilliSeconds(0.1), &Forwarder::lockResourceQueueAdd, this, serviceName, data, ingress);
     ns3::Simulator::Schedule(ns3::MicroSeconds(100), &Forwarder::lockResourceQueueAdd, this, serviceName, *dataPtr, *ingressPtr, makespanNS);
     return;
@@ -3716,8 +3722,8 @@ Forwarder::freeResource(const std::string& serviceName, const Data& data, const 
   ns3::Time timeNow = ns3::Simulator::Now();
   int64_t timeNowNS = timeNow.ToInteger(ns3::Time::NS); // Convert to integer
   auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
-  NFD_LOG_INFO("NFDServiceDiscovery - WFresourceAllocation: Service " << serviceName << " finished running on node " << (*node).GetId() << ". Setting resourceBusy = false (resource unlocked at " << timeNowNS << " nanoseconds).");
-  //NFD_LOG_DEBUG("NFDServiceDiscovery - WFresourceAllocation: Service finished running. Setting resourceBusy = false.");
+  NFD_LOG_INFO("NFDForwarder - WFresourceAllocation: Service " << serviceName << " finished running on node " << (*node).GetId() << ". Setting resourceBusy = false (resource unlocked at " << timeNowNS << " nanoseconds).");
+  //NFD_LOG_DEBUG("NFDForwarder - WFresourceAllocation: Service finished running. Setting resourceBusy = false.");
   //Forwarder::onIncomingDataAfterServiceRuns(data, ingress); // finish processing the incoming data packet.
   Forwarder::onIncomingDataAfterServiceRuns(*dataPtr, *ingressPtr); // finish processing the incoming data packet.
 }
@@ -3733,10 +3739,20 @@ Forwarder::lockResourceQueueAdd(const std::string& serviceName, const Data& data
   request.ingressPtr = std::make_shared<FaceEndpoint>(ingress);
   request.makespanNS = makespanNS;
 
-  m_resourceQueue.push(request);
+  for (const auto& req : m_resourceQueue)
+  {
+    if (req.serviceName == serviceName)
+    {
+      auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+      NFD_LOG_DEBUG("NFDForwarder - WFresourceAllocation: Service " << serviceName << " already in queue on node " << (*node).GetId() << ". Dropping duplicate request.");
+      return;
+    }
+  }
+
+  m_resourceQueue.push_back(request);
 
   auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
-  NFD_LOG_INFO("NFDServiceDiscovery - WFresourceAllocation: Service " << serviceName << " queued on node " << (*node).GetId() << ". Queue size: " << m_resourceQueue.size());
+  NFD_LOG_INFO("NFDForwarder - WFresourceAllocation: Service " << serviceName << " queued on node " << (*node).GetId() << ". Queue size: " << m_resourceQueue.size());
 
   // 2. If the CPU is idling, kick off the processing immediately
   if (!m_resourceBusy)
@@ -3755,7 +3771,7 @@ Forwarder::processNextRequest()
 
   // Grab the request at the front of the FIFO queue
   ResourceRequest nextRequest = m_resourceQueue.front();
-  m_resourceQueue.pop();
+  m_resourceQueue.pop_front();
 
   m_resourceBusy = true;
 
@@ -3763,8 +3779,7 @@ Forwarder::processNextRequest()
   int64_t timeNowNS = timeNow.ToInteger(ns3::Time::NS);
   auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
 
-  //NFD_LOG_DEBUG("NFDServiceDiscovery - WFresourceAllocation: Service " << nextRequest.serviceName << " started running on node " << (*node).GetId() << ". Resource locked at " << timeNowNS << " ns. Remaining queue: " << m_resourceQueue.size());
-  NFD_LOG_INFO("NFDServiceDiscovery - WFresourceAllocation: Service " << nextRequest.serviceName << " started running on node " << (*node).GetId() << ". Setting resourceBusy = true (resource locked at " << timeNowNS << " nanoseconds). Queue size: " << m_resourceQueue.size());
+  NFD_LOG_INFO("NFDForwarder - WFresourceAllocation: Service " << nextRequest.serviceName << " started running on node " << (*node).GetId() << ". Setting resourceBusy = true (resource locked at " << timeNowNS << " nanoseconds). Queue size: " << m_resourceQueue.size());
 
   // Schedule release exactly after the request's specific makespan
   ns3::Simulator::Schedule(ns3::NanoSeconds(nextRequest.makespanNS), 
@@ -3785,8 +3800,7 @@ Forwarder::freeResource(const std::string& serviceName, const Data& data, const 
   int64_t timeNowNS = timeNow.ToInteger(ns3::Time::NS);
   auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
   
-  //NFD_LOG_DEBUG("NFDServiceDiscovery - WFresourceAllocation: Service " << serviceName << " finished running on node " << (*node).GetId() << ". Resource unlocked at " << timeNowNS << " ns.");
-  NFD_LOG_INFO("NFDServiceDiscovery - WFresourceAllocation: Service " << serviceName << " finished running on node " << (*node).GetId() << ". Setting resourceBusy = false (resource unlocked at " << timeNowNS << " nanoseconds). Queue size: " << m_resourceQueue.size());
+  NFD_LOG_INFO("NFDForwarder - WFresourceAllocation: Service " << serviceName << " finished running on node " << (*node).GetId() << ". Setting resourceBusy = false (resource unlocked at " << timeNowNS << " nanoseconds). Queue size: " << m_resourceQueue.size());
 
   // 1. Finish processing the data packet for the completed service
   Forwarder::onIncomingDataAfterServiceRuns(*dataPtr, *ingressPtr);

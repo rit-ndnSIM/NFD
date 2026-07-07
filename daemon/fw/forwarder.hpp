@@ -40,7 +40,7 @@
 #include "table/network-region-table.hpp"
 #include <ndn-cxx/security/key-chain.hpp>
 #include <mutex>
-#include <queue>
+#include <deque>
 #include <memory>
 #include <map>
 #include <vector>
@@ -385,7 +385,7 @@ private:
   std::mutex  m_resourceMutex;  // mutex to account for service execution in the node (CPU usage - only run one service at a time)
   bool m_resourceBusy;  // mutex to account for service execution in the node (CPU usage - only run one service at a time)
   uint64_t m_resourceBusyTime; // this keeps track of how many NS the CPU will be busy for. When a service is added to the queue, its makespan is added to this variable. When a service is completed, its makspan is subtracted.
-  std::queue<ResourceRequest> m_resourceQueue;
+  std::deque<ResourceRequest> m_resourceQueue;
   std::vector<ReceivedInterestRecord> m_receivedInterests; // if this grows too large, swap to std::unordered_map<std::string, std::unordered_set<uint64_t>> keyed by service name for O(1) average lookup
 
   // allow Strategy (base class) to enter pipelines
