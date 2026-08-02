@@ -47,6 +47,7 @@
 #include <set>
 
 #include <nlohmann/json.hpp>
+#include "ns3/event-id.h"
 using json = nlohmann::json;
 
 
@@ -297,6 +298,25 @@ private:
   void
   sendEFTdataUpdateFromCache(std::string nameAndHash, int64_t lowestEFT, const FaceEndpoint& ingress);
 
+  /** \brief pick the lowest EFT, schedule the service, update the FIB and answer downstream
+   *
+   *  Called once every upstream face has reported an EFT, either because the data actually arrived or
+   *  because onSDinterestTimeout gave up on it.
+   */
+  void
+  processAllEFTsReceived(std::string rxedDataNameAndHash, std::string prefixNameString,
+                         std::string name1String, bool updatedEFTmessage);
+
+  /** \brief give up on the SD paths that have not reported an EFT yet
+   *
+   *  Marks every outstanding upstream face as received with an invalid EFT of -1, then lets
+   *  processAllEFTsReceived answer downstream with whatever EFTs did arrive. Does nothing if
+   *  \p sdRound is no longer the round in progress, i.e. that round already completed on its own.
+   */
+  void
+  onSDinterestTimeout(std::string rxedDataNameAndHash, std::string prefixNameString,
+                      std::string name1String, int64_t sdRound);
+
 
   void
   printFibEntriesForPrefix(std::string prefixToPrint);
@@ -378,6 +398,7 @@ private:
   NetworkRegionTable m_networkRegionTable;
   shared_ptr<Face>   m_csFace;
   json m_SDservTracker; // with this data structure, we can keep track of WHICH SD data packets have arrived, the faces (downstream and upstream), the EFT, upstream link delay, as well as service scheduling.
+  std::map<std::string, ns3::EventId> m_SDtimeoutEvents; // keyed by rxedDataNameAndHash: the currently-armed SDtimeout event (if any), so a newer, lower EFT can cancel and replace it.
   std::map<std::string, std::map<nfd::FaceId, std::vector<int64_t>>> m_ndnfcpCallHistory; // m_ndnfcpCallHistory["/serviceName"][faceId] = list of callTimestamps (ns) for NDN-FC+ per-face call frequency
   json m_FibOwnerTracker; // with this data structure, we can keep track of WHICH SD unique path name owns the true FIB entry so that we can remove the FIB entry once no one owns it. (multiple SD unique path names can be related to the same FIB entry, but only one is the optimal one that actually owns it)
   std::mutex m_interestMutex;  // mutex to account for interest processing (can only process one interest at a time)

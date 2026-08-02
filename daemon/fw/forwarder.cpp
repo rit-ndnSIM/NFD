@@ -58,6 +58,15 @@ NFD_LOG_INIT(Forwarder);
 
 const std::string CFG_FORWARDER = "forwarder";
 
+// Multiplier applied to the projected slack when arming the service discovery timeout.
+// This allows us to add some buffer time if needed.
+static constexpr int64_t SD_TIMEOUT_MULTIPLIER = 1;
+
+// Set to false to disable the SD interest timeout mechanism entirely, reverting to the original
+// behavior of always waiting for every upstream face to report an EFT (or never resolving, if one is
+// dropped). Toggle and rebuild to A/B test the timeout's effect on SD latency.
+// static constexpr bool SD_TIMEOUT_ENABLED = true;  This is now controlled from the JSON scenario file, so we don't have to recompile every time we change it. Thus, we can easily compare with and without optimization
+
 static Name
 getDefaultStrategyName()
 {
@@ -141,7 +150,8 @@ m_SDservTracker = {
           "head": <service head as received>,         // We add the service head so that we can generate the name we use for the FIB entry that we create at the end. (serviceDiscovery interest application parameter has more info than regular workflow interest).
           "serviceDiscoveryStartTimeNS": <absolute SD start time>,      // set and initially sent by the consumer
           "workflowStartTimeNS": <absolute estimated WF start time>,    // set and initially sent by the consumer
-          "WFinterestRxedTime": <absolute time when WF interest is estimated to be received>,   // Used for calculating EFT in caching nodes>
+          "WFinterestRxedTime": <absolute time when WF interest is estimated to be received>,   // Used for calculating EFT in caching nodes
+          "hopCounter": <value>,                      // Used for debugging to keep track of the number of hops taken so far (from consumer up to root nodes). Perhaps we can use this for scoped interest propagation at some point.
           "serviceScheduling": {                      // If the service has been scheduled to run in this node, we will see this entry. Otherwise, it won't exist
             "WFnameAndHash": "/service1/WFpDAG_param_hash",             // WFnameAndHash name could match with other ones below
             "inputsReadyTime": <absolute time when all inputs have been received>,
@@ -181,7 +191,8 @@ m_SDservTracker = {
           "head": <service head as received>,         // We add the service head so that we can generate the name we use for the FIB entry that we create at the end. (serviceDiscovery interest application parameter has more info than regular workflow interest).
           "serviceDiscoveryStartTimeNS": <absolute SD start time>,      // set and initially sent by the consumer
           "workflowStartTimeNS": <absolute estimated WF start time>,    // set and initially sent by the consumer
-          "WFinterestRxedTime": <absolute time when WF interest is estimated to be received>,   // Used for calculating EFT in caching nodes>
+          "WFinterestRxedTime": <absolute time when WF interest is estimated to be received>,   // Used for calculating EFT in caching nodes
+          "hopCounter": <value>,                      // Used for debugging to keep track of the number of hops taken so far (from consumer up to root nodes). Perhaps we can use this for scoped interest propagation at some point.
           "serviceScheduling": {                      // If the service has been scheduled to run in this node, we will see this entry. Otherwise, it won't exist
             "WFnameAndHash": "/service1/WFpDAG_param_hash",             // WFnameAndHash name could match with other ones below
             "inputsReadyTime": <absolute time when all inputs have been received>,
@@ -355,6 +366,7 @@ Forwarder::processIncomingInterest(const Interest& interest, const FaceEndpoint&
   if (m_interestBusy) {
     // Resource is busy processing another interest, retry later
     //TODO: if we end up using this mutex, reconsider the delay below. If there are many interests coming in (for example with service discovery), this REALLY slows down simulations
+    //TODO: it should be done with a queue, just like the service processing mutex.
     ns3::Simulator::Schedule(ns3::MicroSeconds(1), &Forwarder::processIncomingInterest, this, *interestPtr, *ingressPtr);
     return;
   }
@@ -590,6 +602,9 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     dagObject["faceIN"] = faceInIdString;
     dagObject["prevHash"] = rxedInterestNameAndHash; // adding the previous name&hash add the full "historical" path of where the interest has come from, trying to make it unique, although faces may have same ID on different nodes.
     dagObject["consumerName"] = consumerName;
+    int64_t hopCounter = dagObject["hopCounter"];
+    hopCounter++;
+    dagObject["hopCounter"] = hopCounter;
    
     ns3::Time timeNow;
     timeNow = ns3::Simulator::Now();
@@ -702,7 +717,11 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
       m_SDservTracker[jsonName]["faceIN"]["resourceAllocation"] = dagObject["resourceAllocation"];  // we capture the setting here so that we know if we'll need to perform this later
       m_SDservTracker[jsonName]["faceIN"]["allocationReuse"] = dagObject["allocationReuse"];  // we capture the setting here so that we know if we'll need to perform this later
       m_SDservTracker[jsonName]["faceIN"]["scheduleCompaction"] = dagObject["scheduleCompaction"];  // we capture the setting here so that we know if we'll need to perform this later
+      m_SDservTracker[jsonName]["faceIN"]["workflowStartTimeNS"] = WFstartTimeNS;                   // we capture the "WFstartTime" here so that we can use it for calculating time offsets later when data packets arrive.
+      m_SDservTracker[jsonName]["faceIN"]["hopCounter"] = hopCounter;                   // we keep track of the hopCounter (from consumer to root service)
       m_SDservTracker[jsonName]["faceIN"]["WFinterestRxedTime"] = timeNowNS + WFstartTimeNS - SDstartTimeNS;  // we capture the "WFinterestRxedTime" here so that we can use it for allocation slot reuse calculations later.
+      m_SDservTracker[jsonName]["faceIN"]["sdTimeoutComputationMultiplier"] = dagObject["sdTimeoutComputationMultiplier"];      // multiplier to see how long to estimate the computation time (against received EFT)
+      //m_SDservTracker[jsonName]["faceIN"]["SDtoWFoffsetNS"] = WFstartTimeNS - SDstartTimeNS;  // constant offset mapping a time in the SD timeline onto the WF timeline, so an absolute EFT can be turned into a relative timeout delay later.
     }
     //else // name already existed (this isn't the first interest)
     //{
@@ -811,7 +830,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
     //if (ingress.face.getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
     //{
-      unsigned char interestBudget = 2; // don't send out too many interests to avoid overwhelming the network. Pick the lowest cost (next hop) faces.
+      //unsigned char interestBudget = 2; // don't send out too many interests to avoid overwhelming the network. Pick the lowest cost (next hop) faces.
       for (fib::Fib::const_iterator fib_iterator = m_fib.begin(); fib_iterator != m_fib.end(); ++fib_iterator)
       {
 
@@ -846,7 +865,8 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
               if (hop_iterator->getFace().getId() != ingress.face.getId()) // do not send new interest out of the incoming face (avoid loops).
               {
 
-                if (interestBudget > 0)
+                //if (interestBudget > 0)
+                if (true)
                 {
 
                   // if faceOUT ID in this name entry doesn't exist, create it (mark interest generated as False and data received as False, delay as -1, EFT as -1).
@@ -870,8 +890,22 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
                     hop_iterator->getFace().sendInterest(*new_interest);
                     //interestBudget--;
 
-                    // mark this interest as generated.
-                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = 1;
+                    // mark this interest as generated. We now use the timestamp rather than a boolean, so we can keep track of when it was generated
+                    int64_t currentTimeNS = (int64_t)ns3::Simulator::Now().ToInteger(ns3::Time::NS);
+                    //m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = 1;
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["intTx"] = currentTimeNS;
+
+                    // tag this face with the SD round its interest belongs to. The round advances every
+                    // time this key's tracker completes and resets dataRx/EFT for reuse, so a Data packet
+                    // that shows up after that reset (e.g. a genuine reply that was cut off by the SD
+                    // timeout, or a duplicate arriving from a reconverging path) can be told apart from one
+                    // that actually answers the CURRENT round's outstanding interest.
+                    int64_t sendRound = 0;
+                    if (m_SDservTracker[jsonName]["faceIN"].contains("sdRound"))
+                    {
+                      sendRound = m_SDservTracker[jsonName]["faceIN"]["sdRound"];
+                    }
+                    m_SDservTracker[jsonName]["faceOUT"][std::to_string(hop_iterator->getFace().getId())]["sentInRound"] = sendRound;
                   }
                   else
                   {
@@ -1480,7 +1514,7 @@ Forwarder::scheduleCompaction(void)
       for (auto* s : group.second) 
       {
           // if the difference is lower than a threshold, then don't bother sending an updated EFT message downstream!!
-//NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << s->name << " can gain " << (s->start - newStart) << " nanoseconds .");
+          //NFD_LOG_DEBUG("NFDServiceDiscovery - SDresourceAllocation: Service " << s->name << " can gain " << (s->start - newStart) << " nanoseconds .");
           //if (newStart != s->start)
           if (newStart < s->start)
           //if (s->start - newStart > 1000000) // only report new EFT if the EFT gain is more than 1ms
@@ -1488,7 +1522,6 @@ Forwarder::scheduleCompaction(void)
 
               // Logging & Updates
               NFD_LOG_DEBUG("NFDServiceDiscovery - schedulerRelease SCHEDULE COMPACTION - LEFT PACKING: sliding service " << s->name << " previously starting at " << s->start << " and now starting at " << newStart);
-//NFD_LOG_INFO ("NFDServiceDiscovery - schedulerRelease SCHEDULE COMPACTION - LEFT PACKING: sliding service " << s->name << " previously starting at " << s->start << " and now starting at " << newStart);
               
               auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
               NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << s->name << " no longer scheduled on node " << (*node).GetId() << " starting at " << s->start << " and ending at " << s->end << " nanoseconds).");
@@ -1540,7 +1573,7 @@ Forwarder::scheduleCompaction(void)
   // now we can report the new EFTs for all the shifted tasks
   for (auto& s : newEFTsToReport)
   {
-//NFD_LOG_INFO("NFDServiceDiscovery - schedule compaction sendEFTdataUpdate for " << s.name << ", new EFT: " << s.end << std::endl);
+    //NFD_LOG_DEBUG("NFDServiceDiscovery - schedule compaction sendEFTdataUpdate for " << s.name << ", new EFT: " << s.end << std::endl);
     this->sendEFTdataUpdate(s.name, s.end);
   }
 
@@ -2043,7 +2076,6 @@ Forwarder::sendCsUpdateInterest(const Data& data)
       Face* localFace = &*it;
       if (localFace->getScope() != ndn::nfd::FACE_SCOPE_NON_LOCAL) {
         NFD_LOG_DEBUG("cabeee csUpdate, generating interest " << interestCsUpdate->getName() << ", for local face " << localFace->getId() << std::endl);
-        //NFD_LOG_INFO("cabeee csUpdate, generating interest " << interestCsUpdate << ", for local face " << localFace << std::endl);
         localFace->sendInterest(*interestCsUpdate);
       }
     }
@@ -2115,7 +2147,6 @@ void
 Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 {
   NFD_LOG_DEBUG("onIncomingData in=" << ingress << " data=" << data.getName());
-//NFD_LOG_INFO("onIncomingData in=" << ingress << " data=" << data.getName());
 
 
   ndn::Name name1;
@@ -2154,8 +2185,32 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
     bool updatedEFTmessage = false;
     NFD_LOG_DEBUG("NFDServiceDiscovery received data with name: " << rxedDataNameAndHash << " - faceID is: " << ingress.face.getId());
-//NFD_LOG_INFO("NFDServiceDiscovery received data with name: " << rxedDataNameAndHash << " - faceID is: " << ingress.face.getId());
-    // Upon receiving an SD data packet through a particular face, 
+
+    // Drop Data that answers an interest from an SD round that has already finished. When a round
+    // completes, processAllEFTsReceived resets dataRx/intTx/EFT so the tracker key can be reused by the
+    // next round, which leaves a late reply indistinguishable from a fresh one. Without this check such a
+    // reply is recorded against the new round, can complete it early with a stale EFT, and makes the node
+    // emit an extra EFT downstream - which is how a consumer ends up seeing several SD data packets for a
+    // single generated interest.
+    if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())].contains("sentInRound"))
+    {
+      int64_t sentInRound = m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["sentInRound"];
+      int64_t currentRound = 0;
+      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("sdRound"))
+      {
+        currentRound = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["sdRound"];
+      }
+      if (sentInRound != currentRound)
+      {
+        auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+        NFD_LOG_DEBUG("NFDServiceDiscovery - stale SD data for " << rxedDataNameAndHash << " on face " << ingress.face.getId()
+                     << " (node " << (*node).GetId() << "): it answers round " << sentInRound
+                     << " but we are now on round " << currentRound << ". Dropping it.");
+        return;
+      }
+    }
+
+    // Upon receiving an SD data packet through a particular face,
     // mark it as received through this face.
     if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] != 0)
     {
@@ -2366,9 +2421,17 @@ if ( (*node).GetId() == 1 && rxedDataNameAndHash == "/service2/params-sha256=d2f
 NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data): " << std::setw(2) << m_SDservTracker << '\n');
 }
 */
+    // check if this is the FIRST data that has been received
+    int numRxed = 0;
+    for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
+    {
+      if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] == 1)
+      {
+        numRxed++;
+      }
+    }
 
     // check if all data has been received now
-
     int allRxed = 1;
     for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
     {
@@ -2380,760 +2443,92 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
 
 
 
-    // Only when ALL interests have been satisfied (out of all the faces where we sent them out), will we generate the data packet(s) downstream with the overall lowest EFT.
-    if (allRxed == 1)
+    // Arm (or re-arm) the timeout for the paths that have not reported yet. The lowest EFT seen so far
+    // tells us when the fastest known path finishes. A path that is still outstanding would, even with
+    // zero computation time upstream, report an EFT no earlier than the moment its data actually reaches
+    // us (mapped onto the WF timeline). So once the WF clock passes that lowest EFT, whatever is still
+    // in flight is guaranteed to be worse and there is no sense in waiting for it.
+    // Every EFT that arrives (not just the first) is checked against the EFT the current timeout was
+    // armed with: if it is lower, the old timeout is cancelled and a tighter one takes its place.
+    float sdTimeoutComputationMultiplier = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["sdTimeoutComputationMultiplier"]; // -1 disables the timeout optimization
+    if (sdTimeoutComputationMultiplier > -1 && allRxed == 0 && eftNS > 0)
     {
-      NFD_LOG_DEBUG("NFDServiceDiscovery, all data packets for " << rxedDataNameAndHash << " have been received on all faces!!! Calculating best EFT and generating data packet downstream");
-      // The new data packet going back downstream will contain: 
-      // "Pruned DAG (pDAG) Service name" that it is being hosted and requested (serviceS/PWFH).
-      // Calculate EFT (earliest finish time) and include it (lowest EFT of all the faces).
-      // Timestamp of when data packet leaves (to measure delay to downstream nodes).
+      bool haveArmedTimeout = m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("timeoutScheduled");
+      int64_t armedEFT = haveArmedTimeout ?
+        (int64_t)m_SDservTracker[rxedDataNameAndHash]["faceIN"]["timeoutArmedEFT"] : -1;
 
-      //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after allRxed): " << std::setw(2) << m_SDservTracker << '\n');
-
-      // We first check if an allocation for this service has already been made. This would happen if after schedule compaction, an updated EFT is reported.
-      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
+      if (!haveArmedTimeout || eftNS < armedEFT)
       {
-        NFD_LOG_DEBUG("NFDServiceDiscovery, all data packets for " << rxedDataNameAndHash << " had already been received, but we received a new one, so it must be an EFT recalculation after schedule compaction.");
-        // can we simply delete the allocation, and let the code below look for a new (and potentially better) spot? - No, handle it separately.
-        //m_SDservTracker[rxedDataNameAndHash]["faceIN"].erase("serviceScheduling");
-      }
-
-
-      // this lowestEFT calculation determines the EFT for the path that can get results the quickest.
-      int64_t lowestEFT = -1;  // initialize to invalid EFT
-      int64_t lowestNonLocalEFT = -1;  // initialize to invalid EFT
-      std::string lowestFace = "";
-      std::string lowestNonLocalFace = "";
-      for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
-      {
-        // figure out which is the lowest EFT of all the upstream faces that we've received packets for so far
-        int64_t thisEFT = m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"];
-        NFD_LOG_DEBUG("NFDServiceDiscovery, EFT for face " << faceOutIterator.key() << ": " << thisEFT);
-        if (thisEFT > 0 && lowestEFT == -1)
+        // cancel whatever timeout is currently pending for this service, since we now have a lower
+        // (better) EFT and want a tighter timeout to replace it instead of waiting on the old one.
+        auto pendingEvent = m_SDtimeoutEvents.find(rxedDataNameAndHash);
+        if (pendingEvent != m_SDtimeoutEvents.end())
         {
-          lowestEFT = thisEFT; // initialize to the first one
-          lowestFace = faceOutIterator.key(); // initialize to the first one
-        }
-        else if (thisEFT > 0 && thisEFT < lowestEFT)
-        {
-          lowestEFT = thisEFT; // this becomes the lowest EFT found so far
-          lowestFace = faceOutIterator.key(); // this becomes the lowest face found so far (could be local or non-local)
+          ns3::Simulator::Cancel(pendingEvent->second);
         }
 
+        int64_t WFstartTimeNS = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["workflowStartTimeNS"];
+        int64_t SDtxTimeNS = m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["intTx"];
+        int64_t currentTimeNS = (int64_t)ns3::Simulator::Now().ToInteger(ns3::Time::NS);
 
-
-        // also keep track of lowest EFT of the "non-local" faces
-        Face* faceIterator;
-        for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+        int64_t eft_ld = (currentTimeNS-SDtxTimeNS)/2;
+        int64_t eft_cpu = (eftNS - WFstartTimeNS) - eft_ld;
+        int64_t eft_cpu_estimated;
+        if (sdTimeoutComputationMultiplier == 0)
         {
-          faceIterator = &*it;
-          if (std::to_string(faceIterator->getId()) == faceOutIterator.key())
-          {
-            if (faceIterator->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
-            {
-              if (thisEFT > 0 && lowestNonLocalEFT == -1)
-              {
-                lowestNonLocalEFT = thisEFT; // initialize to the first one
-                lowestNonLocalFace = faceOutIterator.key(); // initialize to the first one
-              }
-              else if (thisEFT > 0 && thisEFT < lowestNonLocalEFT)
-              {
-                lowestNonLocalEFT = thisEFT; // this becomes the lowest non-local EFT found so far
-                lowestNonLocalFace = faceOutIterator.key(); // this becomes the lowest non-local face found so far
-              }
-            }
-          }
-        }
-
-      }
-
-      int64_t allInputsReceivedEFT = lowestEFT;
-      int64_t WFinterestRxedTime = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["WFinterestRxedTime"];
-      NFD_LOG_DEBUG("NFDServiceDiscovery, WF interest for " << rxedDataNameAndHash << " will be received at time " << WFinterestRxedTime);
-      NFD_LOG_DEBUG("NFDServiceDiscovery, lowestEFT of all inputs is " << allInputsReceivedEFT << " on face " << lowestFace << ", lowestNonLocalEFT is " << lowestNonLocalEFT << " on face " << lowestNonLocalFace << ". Now determining CPU scheduling...");
-
-      
-
-
-
-      // if serviceDiscovery2 is used, there should not be any updatedEFTmessages received, but add the check just in case
-      if (updatedEFTmessage == true && name1String == "/serviceDiscovery")
-      {
-        // if serviceScheduling exists in this entry then this is an updateEFT message.
-        // dont' bother looking for a new slot or anything like that, simply update the "inputsReadyTime" value in the data structure and then run the schedule compaction code
-        NFD_LOG_DEBUG("NFDServiceDiscovery, checking if serviceScheduling allocation exists to then call schedule compaction since this was an EFT update message for " << rxedDataNameAndHash);
-        //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure for just the service that has been updated: " << '\n' << rxedDataNameAndHash << '\n' << std::setw(2) << m_SDservTracker[rxedDataNameAndHash] << '\n');
-        if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
-        {
-          m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = allInputsReceivedEFT;
-          //m_SDservTracker[rxedDataNameAndHash]["faceIN"].erase("serviceScheduling");
-          if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["scheduleCompaction"] == 1)  // if we have it set up for doing schedule compaction
-          {
-            NFD_LOG_DEBUG("NFDServiceDiscovery, calling schedule compaction since this was an EFT update message for " << rxedDataNameAndHash);
-            this->scheduleCompaction();
-          }
-        }
-        else // if serviceScheduling entry doesn't exist, then it is not locally hosted, and we must forward the request further downstream - no need for scheduleCompaction here.
-        {
-          this->sendEFTdataUpdate(rxedDataNameAndHash, allInputsReceivedEFT);
-        }
-        return;
-      }
-
-
-
-
-
-
-
-
-      if (lowestEFT > 0 && m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceAllocation"] == 0)
-      {
-        // Here we take into account the time taken to run the service, and add it to the EFT.
-        // We just want to add the service latency to the EFT, assuming the service can start running right away.
-        // This is simpler than below, where CPU allocation takes place (finding a gap to run the service). In that case, only 1 service can run at a time.
-        NFD_LOG_DEBUG("NFDServiceDiscovery, checking how long it will take to run the service locally, and adding that to the EFT.");
-
-        // if the lowestEFT calculated above is from a local face, then we must calculate what the new EFT would be after scheduling the service in this node.
-        Face* lowestCostFace;
-        for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
-        {
-          lowestCostFace = &*it;
-          //NFD_LOG_DEBUG("NFDServiceDiscovery, evaluating face " << std::to_string(lowestCostFace->getId()) );
-          if (std::to_string(lowestCostFace->getId()) == lowestFace)
-          {
-            //NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace found: " << lowestFace);
-            break;
-          }
-        }
-        if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
-        {
-          // recall serviceLatency from datastructure (we saved it when the data packet from the local face came in - not necessarily the latest received data packet, which is why we need to grab the stored value from the data structure)
-          serviceLatency = m_SDservTracker[rxedDataNameAndHash]["faceOUT"][lowestFace]["serviceLatency"];
-          if (name1String == "/serviceDiscovery")
-          {
-            lowestEFT += serviceLatency;
-          }
-          // if serviceDiscovery2 is used, calculate EFT based on size of queue rather than using scheduling.
-          if (name1String == "/serviceDiscovery2")
-          {
-            uint64_t totalQueueMakespanNS = 0;
-            if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceUtilization"] == 1) // if the flag is set, then we consider the resource utilization to calculate EFT. Otherwise, assumes node is fully available for computation at all times.
-            {
-              for (const auto& req : m_resourceQueue)
-              {
-                  totalQueueMakespanNS += req.makespanNS;
-              }
-              NFD_LOG_DEBUG("Total makespan of all waiting services in the queue (size = " << m_resourceQueue.size() << "): " << totalQueueMakespanNS << " ns.");
-            }
-
-            lowestEFT += serviceLatency + totalQueueMakespanNS; // take into account the current CPU queue (utilization). Assumes when WF request comes in, CPU still has same utilization.
-          }
-
-          // Then re-evaluate if running locally is still the lowest EFT (or if it's our only choice - in which case lowestNonLocalEFT would still be -1).
-          if ((lowestEFT < lowestNonLocalEFT) || (lowestNonLocalEFT == -1)) // if yes, then we run it locally
-          {
-            NFD_LOG_DEBUG("NFDServiceDiscovery - lowestEFT is from local face (after evaluating CPU usage). Service will run locally.");
-          }
-          else // Running locally is no longer the lowest EFT, so don't run the task locally and instead use the other face (lowestNonLocalFace)
-          {
-            // update lowestEFT and lowestFace variables to be the non-local one (with lowestNonLocalEFT)
-            NFD_LOG_DEBUG("NFDServiceDiscovery - NOT RUNNING LOCALLY, RUNNING ELSEWHERE UPSTREAM!!!");
-            lowestEFT = lowestNonLocalEFT;
-            lowestFace = lowestNonLocalFace;
-          }
-
-        }
-      }
-
-      NFD_LOG_DEBUG("NFDServiceDiscovery, finalized lowestEFT: " << lowestEFT);
-      NFD_LOG_DEBUG("NFDServiceDiscovery, finalized lowestFace: " << lowestFace);
-
-
-      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceAllocation"] == 1)
-      {
-
-        // DETERMINE CPU SCHEDULING - ALLOCATION
-
-        // if the lowestEFT calculated above is from a local face, then we must calculate what the new EFT would be after scheduling the service in this node.
-        Face* lowestCostFace;
-        for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
-        {
-          lowestCostFace = &*it;
-          //NFD_LOG_DEBUG("NFDServiceDiscovery, evaluating face " << std::to_string(lowestCostFace->getId()) );
-          if (std::to_string(lowestCostFace->getId()) == lowestFace)
-          {
-            //NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace found: " << lowestFace);
-            break;
-          }
-        }
-
-        NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace: " << lowestCostFace->getId());
-
-        if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
-        {
-          NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is local.");
-
-
-
-          // recall serviceLatency from datastructure (we saved it when the data packet from the local face came in - not necessarily the latest received data packet, which is why we need to grab the stored value from the data structure)
-          serviceLatency = m_SDservTracker[rxedDataNameAndHash]["faceOUT"][lowestFace]["serviceLatency"];
-
-
-
-//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (before looking at allocation reuse): " << std::setw(2) << m_SDservTracker << '\n');
-
-
-          // Check if the WFnameAndHash exists in the currently allocated services and that it can be reused.
-          int64_t previousAllocationEFT = -1; // default value before we start analyzing EFTs.
-          int64_t previousAllocationStart = -1; // default value before we start analyzing EFTs.
-          std::string previousAllocationFace;
-          if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["allocationReuse"] == 1)  // if we have it set up for doing allocation reuse of previously allocated slots
-          {
-            for (auto& serviceIterator : m_SDservTracker.items())
-            {
-              if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
-              {
-                if (m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["WFnameAndHash"] == futureWFnameAndHashString)
-                {
-                  // If this node doesn't use caching and the previously allocated service finishes later than when the WF interest for this latest iteration of the service would arrive, then we reuse the already allocated version.
-                  // An extra PIT entry will be added and will be able to be satisfied once the already allocated service runs.
-                  // If this node uses caching (content store), then we just look for the best previously allocated slot (any end time is OK to reuse)
-                  // m_cs.size() gives us the number of currently cached data packets. m_cs.getLimit() give us the cache size.
-                  //if (m_cs.getLimit() > 0 || m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] > WFinterestRxedTime)
-                  if (m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"] > allInputsReceivedEFT) // only reuse a slot if it starts after all inputs for this service have been received. This way, if the previous allocation is removed, we can truly still use this one.
-                  {
-                    NFD_LOG_DEBUG("NFDServiceDiscovery scheduling with no caching - Found a way to potentially reuse allocation for " << futureWFnameAndHashString << ", which was scheduled to finish at: " << m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] << ", with serviceLatency = " << serviceLatency);
-                    if (previousAllocationEFT == -1 || previousAllocationEFT > m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"]) // now we look for the lowest EFT of the previously allocated slots (look for the best one).
-                    {
-                      previousAllocationEFT = m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"];
-                      previousAllocationStart = m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"];
-                      previousAllocationFace = m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["face"];
-                    }
-                  }
-                }
-              }
-            }
-          }
-
-
-          // Next, we will compare using the already allocated slot that matched above vs scheduling from scratch
-          // so we determine what the new EFT would be after scheduling (could be seriously delayed more if node is very busy)
-          int64_t earliestStartPossible = -1;
-          int64_t earliestEndPossible = -1;
-
-
-          NFD_LOG_DEBUG("NFDServiceDiscovery, parsing all scheduled items into vector for sorting...");
-          // parse all scheduled items into vector (so we can later sort them)
-          std::vector<Service> scheduledVector;
-          for (auto& serviceIterator : m_SDservTracker.items())
-          {
-            if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
-            {
-              scheduledVector.push_back({
-                  serviceIterator.key(),
-                  m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["inputsReadyTime"],
-                  m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"],
-                  m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"]
-              });
-            }
-          }
-
-          // Ensure sorted
-          std::sort(scheduledVector.begin(), scheduledVector.end(),
-                    [](const Service& a, const Service& b){
-                        return a.start < b.start;
-                    });
-  /*
-          NFD_LOG_DEBUG("NFDServiceDiscovery, sorted scheduled items: ");
-          for (size_t i = 0; i < scheduledVector.size(); i++)
-          {
-            NFD_LOG_DEBUG("  item " << i << " name: " << scheduledVector[i].name << ", start: " << scheduledVector[i].start << ", end: " << scheduledVector[i].end);
-          }
-  */
-
-
-          bool spotFound = false;
-          // 0. check if no other service has been scheduled yet
-          if (scheduledVector.empty())
-          {
-            earliestStartPossible = lowestEFT;
-            earliestEndPossible = lowestEFT + serviceLatency;
-            spotFound = true;
-            NFD_LOG_DEBUG("NFDServiceDiscovery scheduling - vector was empty (no existing scheduled services). Can insert at beginning. earliestStartPossible: " << earliestStartPossible << ", + serviceLatency: " << serviceLatency << " = earliestEndPossible: " << earliestEndPossible);
-          }
-
-          // 1. check before first existing service
-          else if (lowestEFT + serviceLatency <= scheduledVector[0].start)
-          {
-            earliestStartPossible = lowestEFT;
-            earliestEndPossible = lowestEFT + serviceLatency;
-            spotFound = true;
-            NFD_LOG_DEBUG("NFDServiceDiscovery scheduling - Can insert before first existing service. earliestStartPossible: " << earliestStartPossible << ", earliestEndPossible: " << earliestEndPossible);
-          }
-
-          // 2. check between existing services
-          else
-          {
-            for (size_t i = 0; i + 1 < scheduledVector.size(); i++)
-            {
-                int64_t earliest = std::max(lowestEFT, scheduledVector[i].end);
-                int64_t gapEnd = scheduledVector[i+1].start;
-                if (earliest + serviceLatency <= gapEnd)
-                {
-                  earliestStartPossible = earliest;
-                  earliestEndPossible = earliest + serviceLatency;
-                  spotFound = true;
-                  NFD_LOG_DEBUG("NFDServiceDiscovery scheduling - Can insert between existing services. earliestStartPossible: " << earliestStartPossible << ", earliestEndPossible: " << earliestEndPossible);
-                  break;
-                }
-            }
-          }
-
-          if (spotFound == false)
-          {
-            // 3. no gap big enough for this service -> schedule after the last existing service
-            int64_t start = std::max(lowestEFT, scheduledVector.back().end);
-            earliestStartPossible = start;
-            earliestEndPossible = start + serviceLatency;
-            spotFound = true;
-            NFD_LOG_DEBUG("NFDServiceDiscovery scheduling - Can insert after last existing service. earliestStartPossible: " << earliestStartPossible << ", earliestEndPossible: " << earliestEndPossible);
-          }
-
-
-          NFD_LOG_DEBUG("NFDServiceDiscovery re-evaluating lowest EFT after potential scheduling - earliestEndPossible: " << earliestEndPossible << ", lowestNonLocalEFT: " << lowestNonLocalEFT);
-
-          NFD_LOG_DEBUG("NFDServiceDiscovery - previousAllocationEFT: " << previousAllocationEFT);
-
-
-
-
-          // There are THREE options. 1) Use previous allocation. 2) Use new allocation locally. 3) Use non-local Face.
-          // Pick the earliest EFT of the three.
-          // If using a previous allocation, we create a replicated allocation slot again so that any schedulerRelease messages will only release a single slot without breaking dependencies for the services that were reusing that slot.
-          // If using a previous allocation, there is no need to add a new FIB entry.
-          if (previousAllocationEFT != -1 && previousAllocationEFT <= earliestEndPossible)
-          {
-            NFD_LOG_DEBUG("NFDServiceDiscovery - reusing an allocation spot from a previous scheduled service instance.");
-            lowestEFT = previousAllocationEFT;
-
-            // creating a copy of the allocated slot (as done below) prevents reused allocations from disappearing when a schedulerRelease message is received for a different version of the allocated slot. A slot is truly only release if no other versions of a service require it.
-            if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
-            {
-              NFD_LOG_ERROR("NFD SD Forwarding ERROR!! This service has already been scheduled!!!!");
-            }
-            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["WFnameAndHash"] = futureWFnameAndHashString;
-            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = allInputsReceivedEFT;
-            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] = previousAllocationStart;
-            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] = previousAllocationEFT;
-            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["face"] = previousAllocationFace;
-            // print info level message with node id, start and stop time, so process script can see it
-            auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
-            NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << rxedDataNameAndHash << " scheduled on node " << (*node).GetId() << " starting at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] << " and ending at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] << " nanoseconds). This is an allocation reuse.");
-            //lowestFace = previousAllocationLowestFace; // if we are reusing a previous allocation, its lowestFace will be the local face, which won't require a FIB entry to be created.
-//NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure for just this service (on Data after scheduled): " << '\n' << rxedDataNameAndHash << '\n' << std::setw(2) << m_SDservTracker[rxedDataNameAndHash] << '\n');
-          }
-
-          // Then re-evaluate if running locally is still the lowest EFT (or if it's our only choice - in which case lowestNonLocalEFT would still be -1).
-          else if ((earliestEndPossible < lowestNonLocalEFT) || (lowestNonLocalEFT == -1)) // if yes, then schedule it locally
-          {
-            if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
-            {
-              NFD_LOG_ERROR("NFD SD Forwarding ERROR!! This service has already been scheduled!!!!");
-            }
-            NFD_LOG_DEBUG("NFDServiceDiscovery - SCHEDULING TO RUN LOCALLY!!!");
-            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["WFnameAndHash"] = futureWFnameAndHashString;
-            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = allInputsReceivedEFT;
-            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] = earliestStartPossible;
-            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] = earliestEndPossible;
-            m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["face"] = lowestFace;
-            lowestEFT = earliestEndPossible;
-            //lowestFace = lowestFace; // if we are here, lowestFace will be the local face already.
-
-            // print info level message with node id, start and stop time, so process script can see it
-            auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
-            NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << rxedDataNameAndHash << " scheduled on node " << (*node).GetId() << " starting at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] << " and ending at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] << " nanoseconds).");
-
-//NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure for just this service (on Data after scheduled): " << '\n' << rxedDataNameAndHash << '\n' << std::setw(2) << m_SDservTracker[rxedDataNameAndHash] << '\n');
-            if (earliestStartPossible > allInputsReceivedEFT)
-            {
-              NFD_LOG_DEBUG("NFDServiceDiscovery - FYI: inputs are arriving before allocation slot!!");
-            }
-
-            // send schedulerRelease message to each face where the same service results may have come from - they are no longer needed to run elsewhere since the local EFT is lower.
-            //sendSchedulerReleaseInterestUpstream(rxedDataNameAndHash, lowestFace);
-
-          }
-          else // Running locally is no longer the lowest EFT, so don't schedule the task locally and instead use the other face (lowestNonLocalFace)
-          {
-            // update lowestEFT and lowestFace variables to be the non-local one (with lowestNonLocalEFT)
-            NFD_LOG_DEBUG("NFDServiceDiscovery - NOT SCHEDULING, RUNNING ELSEWHERE UPSTREAM!!!");
-            lowestEFT = lowestNonLocalEFT;
-            lowestFace = lowestNonLocalFace;
-          }
-
-
-//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after scheduled): " << std::setw(2) << m_SDservTracker << '\n');
-
-
-
-
+          eft_cpu_estimated = 0;
         }
         else
         {
-          NFD_LOG_DEBUG("NFDServiceDiscovery - lowest cost face is not local. No need to schedule anything here.");
+          eft_cpu_estimated = eft_cpu / sdTimeoutComputationMultiplier;
         }
-
-
-        // send schedulerRelease messages to each face (except the lowest cost face) where the same service results may have come from - they are no longer needed to run elsewhere other than the lowest cost face.
-        sendSchedulerReleaseInterestUpstream(rxedDataNameAndHash, lowestFace);
-
-        NFD_LOG_DEBUG("NFDServiceDiscovery - scheduling done");
-
-      } // end if resourceAllocation == 1
-
-
-
-//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data, before FIB entry analysis): " << std::setw(2) << m_SDservTracker << '\n');
-
-
-
-
-      NFD_LOG_DEBUG("NFDServiceDiscovery - generating FIB entry now...");
-
-      // GENERATE NEW FIB ENTRY
-
-      // create the FIB entry, so that when the workflow runs, we route through the face that has the lowest EFT.
-      // The node will record the lowest EFT cost in the FIB by creating a new table entry using the workflow pDAG name (not the serviceDiscovery pDAG name).
-      // The cost will be EFT in nano-seconds. This EFT is units of time after the initial interest is generated.
-      //auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
-      if (lowestEFT > 0)
-      {
-
-        Face* lowestCostFace;
-        for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+        //int64_t slackNS = (eftNS - WFstartTimeNS)*2 - eft_ld*2; // how far the fastest known path finishes
+        int64_t slackNS = (eftNS - WFstartTimeNS - eft_cpu_estimated)*2 - eft_ld*2; // how far the fastest known path finishes
+        if (slackNS < 0)
         {
-          lowestCostFace = &*it;
-          if (std::to_string(lowestCostFace->getId()) == lowestFace)
-          {
-            break;
-          }
+          slackNS = 0; // the fastest path is already due, so there is nothing left to wait for
         }
+        int64_t timeoutNS = SD_TIMEOUT_MULTIPLIER * slackNS;
 
 
+        // Tag the timeout with the SD round it belongs to. Once a round finishes it resets every
+        // dataRx back to 0 for the next one, so the timeout cannot tell from dataRx alone whether it
+        // still has work to do. Comparing the round it was armed in against the current round is what
+        // stops a timeout left over from a round that already completed on its own.
+        int64_t sdRound = 0;
+        if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("sdRound"))
+        {
+          sdRound = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["sdRound"];
+        }
 
-/*
-old m_FibOwnerTracker = {
-    "/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
-        "fibEntryExists": 0/1,                              // if any of the faceIDs below claim a fibOwner, this value will be 1, otherwise 0. Represents the actual FIB entry existing or not.
-        "/service1/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-          "faceOUT": {
-            "faceID3": {                                    // faceID where the interest has been forwarded to
-                "EFT": 3,                                   // 3ms is the EFT upstream
-                "fibOwner": 0                               // tells us if this is the entry that currently defined the FIB entry. Only one per /service1/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
-            },
-            "faceID4": {                                    // faceID where the interest has been forwarded to
-                "EFT": 2,                                   // 2ms is the EFT upstream
-                "fibOwner": 1                               // tells us if this is the entry that currently defined the FIB entry. Only one per /service1/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
-            },
-            "faceID5": {                                    // faceID where the interest has been forwarded to
-                "EFT": -1                                   // default value is -1 (data packet not received yet)
-                "fibOwner": 0                               // tells us if this is the entry that currently defined the FIB entry. Only one per /service1/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
-            }
-          }
-        }
-        "/service1/faceInIdString2&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-          "faceOUT": {
-            "faceID3": {                                    // faceID where the interest has been forwarded to
-                "EFT": 6,                                   // this is the EFT upstream
-                "fibOwner": 0                               // tells us if this is the entry that currently defined the FIB entry. Only one per /service1/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
-            },
-            "faceID5": {                                    // faceID where the interest has been forwarded to
-                "EFT": -1                                   // default value is -1 (data packet not received yet)
-                "fibOwner": 0                               // tells us if this is the entry that currently defined the FIB entry. Only one per /service1/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
-            }
-          }
-        }
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["timeoutScheduled"] = 1;
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["timeoutArmedEFT"] = eftNS;
+        // log the raw slack rather than the clamped one, so a negative value (the fastest path is
+        // already due in WF terms, and the timeout will fire immediately) stays visible in the log
+        auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+        NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout: Service " << rxedDataNameAndHash
+                    << (haveArmedTimeout ? " RE-armed" : " armed")
+                    << " timeout on node " << (*node).GetId()
+                    << " for round " << sdRound
+                    << " (rxed " << numRxed << " so far)."
+                    << " hopCounter = " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["hopCounter"]
+                    << " EFT = " << eftNS << "ns,"
+                    << " slack = " << slackNS << "ns, "
+                    << " eft_ld = " << eft_ld << "ns, "
+                    << " eft_cpu = " << eft_cpu << "ns, "
+                    << " eft_cpu_estimated = " << eft_cpu_estimated << "ns, "
+                    << " firing in " << timeoutNS << "ns.");
+        m_SDtimeoutEvents[rxedDataNameAndHash] =
+          ns3::Simulator::Schedule(ns3::NanoSeconds(timeoutNS), &Forwarder::onSDinterestTimeout, this,
+                                   rxedDataNameAndHash, prefixNameString, name1String, sdRound);
+      }
     }
-}
 
 
-
-old m_FibOwnerTracker = {
-    "/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
-        "/service1/faceInIdString1&pDAG_param_hash": 0,     // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-                                                                // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
-        "/service1/faceInIdString2&pDAG_param_hash": 1,     // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-                                                                // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
-        "/service1/faceInIdString3&pDAG_param_hash": 0      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-                                                                // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
-    },
-    "/service2/WFpDAG_param_hash": {                        // key has full name service/pDAG
-        "/service2/faceInIdString1&pDAG_param_hash": 1,     // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-                                                                // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
-        "/service2/faceInIdString2&pDAG_param_hash": 0      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-                                                                // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
-    },
-    "/service3/WFpDAG_param_hash": {                        // key has full name service/pDAG
-        etc...
-    }
-}
-
-
-
-m_FibOwnerTracker = {
-    "/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
-        "/service1/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-            "eft": 6,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
-            "faceID": "260",                                    // faceID of the face where this EFT can be achieved
-            "faceType": "local"                               // local or non-local
-        }
-        "/service1/faceInIdString2&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-            "eft": 7,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
-            "faceID": "262",                                    // faceID of the face where this EFT can be achieved
-            "faceType": "non-local"                           // local or non-local
-        }
-        "/service1/faceInIdString3&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-            "eft": 9,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
-            "faceID": "258",                                    // faceID of the face where this EFT can be achieved
-            "faceType": "non-local"                           // local or non-local
-        }
-    },
-    "/service2/WFpDAG_param_hash": {                        // key has full name service/pDAG
-        "/service2/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-            "eft": 4,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
-            "faceID": "260",                                    // faceID of the face where this EFT can be achieved
-            "faceType": "local"                               // local or non-local
-        }
-        "/service2/faceInIdString2&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
-            "eft": 3,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
-            "faceID": "258",                                    // faceID of the face where this EFT can be achieved
-            "faceType": "non-local"                           // local or non-local
-        }
-    },
-    "/service3/WFpDAG_param_hash": {                        // key has full name service/pDAG
-        etc...
-    }
-}
-
-
-
-*/
-
-
-
-
-        // make value of this specific rxedDataNameAndHash = lowestEFT
-        m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["eft"] = lowestEFT;
-        m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceID"] = lowestFace;
-        if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
-        {
-          m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceType"] = "local";
-        }
-        if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
-        {
-          m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceType"] = "non-local";
-        }
-
-        // Iterate through all Service Discovery paths tracking this workflow entry, and see what the lowest EFT for this WF name and hash currently is, so that we can update the FIB entry.
-        uint64_t wfLowestEft = std::numeric_limits<uint64_t>::max();
-        std::string wfLowestFaceID = "";
-        std::string wfLowestFaceType = "";
-
-        const auto& pathsMap = m_FibOwnerTracker[futureWFnameAndHashString];
-        for (auto it = pathsMap.begin(); it != pathsMap.end(); ++it) {
-          const auto& pathData = it.value();
-
-          // Ensure all required fields exist in this inner entry to prevent crashes
-          if (pathData.contains("eft") && pathData.contains("faceID") && pathData.contains("faceType")) {
-            uint64_t currentEft = pathData["eft"].get<uint64_t>();
-
-            // Keep track of the absolute lowest EFT entry
-            if (currentEft < wfLowestEft) {
-              wfLowestEft = currentEft;
-              wfLowestFaceID = pathData["faceID"].get<std::string>();
-              wfLowestFaceType = pathData["faceType"].get<std::string>();
-            }
-          }
-        }
-
-        // if it is a local face (to an application - to a locally hosted service), we don't create the FIB entry, and instead rely on the 0 cost regular FIB entry from the service itself.
-          // this is because the recorded face with lowest EFT is for the serviceDiscovery service's face, not the actual workflow service's face. Each application gets its own local face.
-        if (wfLowestFaceType == "local")
-        {
-          // remove entry
-          NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry and skipping creating FIB entry for " << futureWFnameAndHashString << " since lowest EFT is achieved on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
-          fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
-          if (exact != nullptr) {
-            m_fib.erase(futureWFnameAndHash);
-            NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
-          }
-        }
-        if (wfLowestFaceType == "non-local")
-        {
-          // remove entry
-          NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry for " << futureWFnameAndHashString << " and creating updated entry afterwards.");
-          fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
-          if (exact != nullptr) {
-            m_fib.erase(futureWFnameAndHash);
-            NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
-          }
-
-          // create new entry
-          NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is NOT local. Going to try to add FIB entry.");
-          fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
-          Face* wfLowestCostFace;
-          for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
-          {
-            wfLowestCostFace = &*it;
-            if (std::to_string(wfLowestCostFace->getId()) == wfLowestFaceID)
-            {
-              break;
-            }
-          }
-          m_fib.addOrUpdateNextHop(*entry, *wfLowestCostFace, wfLowestEft);
-        }
-
-      }
-      else
-      {
-        NFD_LOG_DEBUG("NFDServiceDiscovery - skipping generating FIB entry since lowest EFT is -1.");
-      }
-
-
-
-/*
-      // if it is a local face (to an application - to a locally hosted service), we don't create the FIB entry, and instead rely on the 0 cost regular FIB entry from the service itself.
-        // this is because the recorded face with lowest EFT is for the serviceDiscovery service's face, not the actual workflow service's face. Each application gets its own local face.
-      if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
-      {
-        NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is local. Going to try to delete FIB entry if it has no owner. This is for WF name " << futureWFnameAndHashString);
-        // if there is an existing FIB entry for this name&pDAG, remove it. We need to forward to this local face using regular FIB entry with just service name and cost 0.
-
-        // If we are doing allocation, then we can't just delete the entry if it exists. We may have several "active" requests with unique paths. Only the current path that this data packet was for has finished being analyzed.
-        //      Other paths may still be optimal, but since they all share the same futureWFnameAndHash for each face, removing this one would remove the other one(s) for that face too.
-        //      Look into perhaps keeping a local custom fib where we can store the rxedDataNameAndHash too. If we no longer need the fib entry (cuz it's not optimal), we can then check and see if there
-        //      are still other fib entries for this futureWFnameAndHash on that same face, and if there are, we don't remove the actual FIB entry. We only remove it once there are no more entries in the custom FIB for that particular face.
-
-
-
-        // make value of this specific rxedDataNameAndHash = lowestEFT
-        m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash] = lowestEFT;
-
-        // Optional Cleanup: Erase the specific path string entirely if it's no longer tracking an active owner. Otherwise, after a long time, this data structure will just keep growing indefinitely.
-        // m_FibOwnerTracker[futureWFnameAndHashString].erase(rxedDataNameAndHash);
-
-        //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_FibOwnerTracker data structure: " << std::setw(2) << m_FibOwnerTracker << '\n');
-        // check if any other values for this futureWFnameAndHash are still non-zero. If all are zero (no owners), then remove real FIB entry
-        bool has_active_owner = false;
-        if (m_FibOwnerTracker.contains(futureWFnameAndHashString))
-        {
-          for (auto& [service, value] : m_FibOwnerTracker[futureWFnameAndHashString].items())
-          {
-            if (value != 0) {
-              has_active_owner = true;
-              NFD_LOG_DEBUG("NFDServiceDiscovery, FIB entry has active owner (not deleting entry)");
-              break; 
-            }
-          }
-        }
-
-        if (has_active_owner == false)
-        {
-          NFD_LOG_DEBUG("NFDServiceDiscovery, skipping creating FIB entry for " << futureWFnameAndHashString << " since it is on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
-//NFD_LOG_INFO("NFDServiceDiscovery, skipping creating FIB entry for " << futureWFnameAndHashString << " since it is on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
-          fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
-          if (exact != nullptr) {
-            m_fib.erase(futureWFnameAndHash);
-            NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
-//NFD_LOG_INFO("NFDServiceDiscovery, entry for " << futureWFnameAndHashString << " removed from FIB. This is for rxedDataNameAndHash: " << rxedDataNameAndHash << "\n");
-          }
-        }
-      }
-
-      // otherwise, if it is a non-local face, we would be going out to another NFD node, and thus we create a new FIB entry with that non-local face.
-      if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
-      {
-        NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is NOT local. Going to try to add FIB entry.");
-        fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
-        m_fib.addOrUpdateNextHop(*entry, *lowestCostFace, lowestEFT);
-
-        // start by making all entries = 0 (we will set the active one afterwards)
-        //if (m_FibOwnerTracker.contains(futureWFnameAndHashString))
-        //{
-        //  for (auto& [service, value] : m_FibOwnerTracker[futureWFnameAndHashString].items())
-        //  {
-        //   value = 0;
-        //  }
-        //}
-
-
-        // make value of this specific rxedDataNameAndHash = lowestEFT. Creates if doesn't exist
-        m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash] = lowestEFT;
-        NFD_LOG_DEBUG("NFDServiceDiscovery, addNextHopRecord FIB entry for " << futureWFnameAndHashString << " added to FIB, with face " << lowestCostFace->getId() << ", and cost " << lowestEFT << ". This is for rxedDataNameAndHash: " << rxedDataNameAndHash << "\n");
-//NFD_LOG_INFO("NFDServiceDiscovery, addNextHopRecord entry for " << futureWFnameAndHashString << " added to FIB, with face " << lowestCostFace->getId() << ", and cost " << lowestEFT << ". This is for rxedDataNameAndHash: " << rxedDataNameAndHash << "\n");
-      }
-
-*/
-
-
-
-/*
-
-      if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
-      {
-        NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry and skipping creating FIB entry for " << futureWFnameAndHashString << " since lowest EFT is achieved on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
-        fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
-        if (exact != nullptr) {
-          m_fib.erase(futureWFnameAndHash);
-          NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
-        }
-      }
-      if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
-      {
-        NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry for " << futureWFnameAndHashString << " and creating a new one based on the latest known lowestEFT (which is on non-local face).");
-        fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
-        if (exact != nullptr) {
-          m_fib.erase(futureWFnameAndHash);
-          NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
-        }
-
-        NFD_LOG_DEBUG("NFDServiceDiscovery, adding FIB entry for " << futureWFnameAndHashString << " to non-local face.");
-        fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
-        m_fib.addOrUpdateNextHop(*entry, *lowestCostFace, lowestEFT);
-      }
-
-*/
-
-      //this->printFibEntriesForPrefix(prefixNameString);
-
-
-      this->sendEFTdataUpdate(rxedDataNameAndHash, lowestEFT);
-
-
-
-
-      // clear m_SDservTracker faceOUT entry FOR THIS SERVICE ONLY, so that if a new interest is received, we go looking for inputs again
-      //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - removing m_SDservTracker entry for " << rxedDataNameAndHash << '\n');
-      //m_SDservTracker.erase(rxedDataNameAndHash); // erase the entire entry
-      //m_SDservTracker[rxedDataNameAndHash].erase("faceOUT"); // only erase the "faceOUT" portion, otherwise we would be removing the CPU scheduling information!
-      // we can't just erase the faceOUT portion, because I'm trying to use it for disseminating schedulerRelease messages too! So instead we just reset all the values.
-      // Actually, we can just leave the values as they were. This way, after schedule compaction, an update message will trigger EFT adjustments even if only one input is updated.
-
-
-      for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
-      {
-        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["intTx"] = 0;
-        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] = 0;
-        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["linkDelay"] = -1;
-        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"] = -1;
-      }
-
-
-
-//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after sending downstream): " << std::setw(2) << m_SDservTracker << '\n');
-
+    // Only when ALL interests have been satisfied (out of all the faces where we sent them out), will we generate the data packet(s) downstream with the overall lowest EFT.
+    if (allRxed == 1)
+    {
+      this->processAllEFTsReceived(rxedDataNameAndHash, prefixNameString, name1String, updatedEFTmessage);
     } // end if (allRxed)
 
   } // end if (name1String == "/serviceDiscovery")
@@ -3379,6 +2774,864 @@ m_FibOwnerTracker = {
   }
 
 
+}
+
+
+
+void
+Forwarder::processAllEFTsReceived(std::string rxedDataNameAndHash, std::string prefixNameString,
+                                  std::string name1String, bool updatedEFTmessage)
+{
+  // Rebuild the name&pDAG just like it will be created by the regular consumer when the real workflow
+  // runs. The service name is the first component of rxedDataNameAndHash, and the pDAG/head we stored
+  // when the SD interest came in supply the application parameters that produce the hash.
+  ndn::Name futureWFnameAndHash;
+  std::string futureWFnameAndHashString = prefixNameString + ndn::Name(rxedDataNameAndHash).getSubName(0,1).toUri();
+
+  json dagObject;
+  dagObject["dag"]  = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["dag"];
+  dagObject["head"] = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["head"];
+  std::string updatedDagString = dagObject.dump();
+  // in order to convert from std::string to a char[] datatype we do the following (https://stackoverflow.com/questions/7352099/stdstring-to-char):
+  char *dagStringParameter = new char[updatedDagString.length() + 1];
+  strcpy(dagStringParameter, updatedDagString.c_str());
+  size_t lengthParam = strlen(dagStringParameter);
+
+  shared_ptr<Interest> dummyInterest = make_shared<Interest>();
+  dummyInterest->setName(futureWFnameAndHashString);
+  dummyInterest->setApplicationParameters((const uint8_t *)dagStringParameter, lengthParam);
+  delete[] dagStringParameter;
+  futureWFnameAndHash = dummyInterest->getName();
+  futureWFnameAndHashString = futureWFnameAndHash.toUri();
+
+  // recalled from the data structure further below, where the local face reported it
+  int64_t serviceLatency = -1;
+
+  NFD_LOG_DEBUG("NFDServiceDiscovery, all data packets for " << rxedDataNameAndHash << " have been received on all faces!!! Calculating best EFT and generating data packet downstream");
+  // The new data packet going back downstream will contain: 
+  // "Pruned DAG (pDAG) Service name" that it is being hosted and requested (serviceS/PWFH).
+  // Calculate EFT (earliest finish time) and include it (lowest EFT of all the faces).
+  // Timestamp of when data packet leaves (to measure delay to downstream nodes).
+
+  //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after allRxed): " << std::setw(2) << m_SDservTracker << '\n');
+
+  // We first check if an allocation for this service has already been made. This would happen if after schedule compaction, an updated EFT is reported.
+  if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
+  {
+    NFD_LOG_DEBUG("NFDServiceDiscovery, all data packets for " << rxedDataNameAndHash << " had already been received, but we received a new one, so it must be an EFT recalculation after schedule compaction.");
+    // can we simply delete the allocation, and let the code below look for a new (and potentially better) spot? - No, handle it separately.
+    //m_SDservTracker[rxedDataNameAndHash]["faceIN"].erase("serviceScheduling");
+  }
+
+
+  // this lowestEFT calculation determines the EFT for the path that can get results the quickest.
+  int64_t lowestEFT = -1;  // initialize to invalid EFT
+  int64_t lowestNonLocalEFT = -1;  // initialize to invalid EFT
+  std::string lowestFace = "";
+  std::string lowestNonLocalFace = "";
+  for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
+  {
+    // figure out which is the lowest EFT of all the upstream faces that we've received packets for so far
+    int64_t thisEFT = m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"];
+    NFD_LOG_DEBUG("NFDServiceDiscovery, EFT for face " << faceOutIterator.key() << ": " << thisEFT);
+    if (thisEFT > 0 && lowestEFT == -1)
+    {
+      lowestEFT = thisEFT; // initialize to the first one
+      lowestFace = faceOutIterator.key(); // initialize to the first one
+    }
+    else if (thisEFT > 0 && thisEFT < lowestEFT)
+    {
+      lowestEFT = thisEFT; // this becomes the lowest EFT found so far
+      lowestFace = faceOutIterator.key(); // this becomes the lowest face found so far (could be local or non-local)
+    }
+
+
+
+    // also keep track of lowest EFT of the "non-local" faces
+    Face* faceIterator;
+    for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+    {
+      faceIterator = &*it;
+      if (std::to_string(faceIterator->getId()) == faceOutIterator.key())
+      {
+        if (faceIterator->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+        {
+          if (thisEFT > 0 && lowestNonLocalEFT == -1)
+          {
+            lowestNonLocalEFT = thisEFT; // initialize to the first one
+            lowestNonLocalFace = faceOutIterator.key(); // initialize to the first one
+          }
+          else if (thisEFT > 0 && thisEFT < lowestNonLocalEFT)
+          {
+            lowestNonLocalEFT = thisEFT; // this becomes the lowest non-local EFT found so far
+            lowestNonLocalFace = faceOutIterator.key(); // this becomes the lowest non-local face found so far
+          }
+        }
+      }
+    }
+
+  }
+
+  int64_t allInputsReceivedEFT = lowestEFT;
+  int64_t WFinterestRxedTime = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["WFinterestRxedTime"];
+  NFD_LOG_DEBUG("NFDServiceDiscovery, WF interest for " << rxedDataNameAndHash << " will be received at time " << WFinterestRxedTime);
+  NFD_LOG_DEBUG("NFDServiceDiscovery, lowestEFT of all inputs is " << allInputsReceivedEFT << " on face " << lowestFace << ", lowestNonLocalEFT is " << lowestNonLocalEFT << " on face " << lowestNonLocalFace << ". Now determining CPU scheduling...");
+
+  
+
+
+
+  // if serviceDiscovery2 is used, there should not be any updatedEFTmessages received, but add the check just in case
+  if (updatedEFTmessage == true && name1String == "/serviceDiscovery")
+  {
+    // if serviceScheduling exists in this entry then this is an updateEFT message.
+    // dont' bother looking for a new slot or anything like that, simply update the "inputsReadyTime" value in the data structure and then run the schedule compaction code
+    NFD_LOG_DEBUG("NFDServiceDiscovery, checking if serviceScheduling allocation exists to then call schedule compaction since this was an EFT update message for " << rxedDataNameAndHash);
+    //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure for just the service that has been updated: " << '\n' << rxedDataNameAndHash << '\n' << std::setw(2) << m_SDservTracker[rxedDataNameAndHash] << '\n');
+    if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
+    {
+      m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = allInputsReceivedEFT;
+      //m_SDservTracker[rxedDataNameAndHash]["faceIN"].erase("serviceScheduling");
+      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["scheduleCompaction"] == 1)  // if we have it set up for doing schedule compaction
+      {
+        NFD_LOG_DEBUG("NFDServiceDiscovery, calling schedule compaction since this was an EFT update message for " << rxedDataNameAndHash);
+        this->scheduleCompaction();
+      }
+    }
+    else // if serviceScheduling entry doesn't exist, then it is not locally hosted, and we must forward the request further downstream - no need for scheduleCompaction here.
+    {
+      this->sendEFTdataUpdate(rxedDataNameAndHash, allInputsReceivedEFT);
+    }
+    return;
+  }
+
+
+
+
+
+
+
+
+  if (lowestEFT > 0 && m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceAllocation"] == 0)
+  {
+    // Here we take into account the time taken to run the service, and add it to the EFT.
+    // We just want to add the service latency to the EFT, assuming the service can start running right away.
+    // This is simpler than below, where CPU allocation takes place (finding a gap to run the service). In that case, only 1 service can run at a time.
+    NFD_LOG_DEBUG("NFDServiceDiscovery, checking how long it will take to run the service locally, and adding that to the EFT.");
+
+    // if the lowestEFT calculated above is from a local face, then we must calculate what the new EFT would be after scheduling the service in this node.
+    Face* lowestCostFace;
+    for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+    {
+      lowestCostFace = &*it;
+      //NFD_LOG_DEBUG("NFDServiceDiscovery, evaluating face " << std::to_string(lowestCostFace->getId()) );
+      if (std::to_string(lowestCostFace->getId()) == lowestFace)
+      {
+        //NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace found: " << lowestFace);
+        break;
+      }
+    }
+    if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+    {
+      // recall serviceLatency from datastructure (we saved it when the data packet from the local face came in - not necessarily the latest received data packet, which is why we need to grab the stored value from the data structure)
+      serviceLatency = m_SDservTracker[rxedDataNameAndHash]["faceOUT"][lowestFace]["serviceLatency"];
+      if (name1String == "/serviceDiscovery")
+      {
+        lowestEFT += serviceLatency;
+      }
+      // if serviceDiscovery2 is used, calculate EFT based on size of queue rather than using scheduling.
+      if (name1String == "/serviceDiscovery2")
+      {
+        uint64_t totalQueueMakespanNS = 0;
+        if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceUtilization"] == 1) // if the flag is set, then we consider the resource utilization to calculate EFT. Otherwise, assumes node is fully available for computation at all times.
+        {
+          for (const auto& req : m_resourceQueue)
+          {
+              totalQueueMakespanNS += req.makespanNS;
+          }
+          NFD_LOG_DEBUG("Total makespan of all waiting services in the queue (size = " << m_resourceQueue.size() << "): " << totalQueueMakespanNS << " ns.");
+        }
+
+        lowestEFT += serviceLatency + totalQueueMakespanNS; // take into account the current CPU queue (utilization). Assumes when WF request comes in, CPU still has same utilization.
+      }
+
+      // Then re-evaluate if running locally is still the lowest EFT (or if it's our only choice - in which case lowestNonLocalEFT would still be -1).
+      if ((lowestEFT < lowestNonLocalEFT) || (lowestNonLocalEFT == -1)) // if yes, then we run it locally
+      {
+        NFD_LOG_DEBUG("NFDServiceDiscovery - lowestEFT is from local face (after evaluating CPU usage). Service will run locally.");
+      }
+      else // Running locally is no longer the lowest EFT, so don't run the task locally and instead use the other face (lowestNonLocalFace)
+      {
+        // update lowestEFT and lowestFace variables to be the non-local one (with lowestNonLocalEFT)
+        NFD_LOG_DEBUG("NFDServiceDiscovery - NOT RUNNING LOCALLY, RUNNING ELSEWHERE UPSTREAM!!!");
+        lowestEFT = lowestNonLocalEFT;
+        lowestFace = lowestNonLocalFace;
+      }
+
+    }
+  }
+
+  NFD_LOG_DEBUG("NFDServiceDiscovery, finalized lowestEFT: " << lowestEFT);
+  NFD_LOG_DEBUG("NFDServiceDiscovery, finalized lowestFace: " << lowestFace);
+
+
+  if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["resourceAllocation"] == 1)
+  {
+
+    // DETERMINE CPU SCHEDULING - ALLOCATION
+
+    // if the lowestEFT calculated above is from a local face, then we must calculate what the new EFT would be after scheduling the service in this node.
+    Face* lowestCostFace;
+    for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+    {
+      lowestCostFace = &*it;
+      //NFD_LOG_DEBUG("NFDServiceDiscovery, evaluating face " << std::to_string(lowestCostFace->getId()) );
+      if (std::to_string(lowestCostFace->getId()) == lowestFace)
+      {
+        //NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace found: " << lowestFace);
+        break;
+      }
+    }
+
+    NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace: " << lowestCostFace->getId());
+
+    if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+    {
+      NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is local.");
+
+
+
+      // recall serviceLatency from datastructure (we saved it when the data packet from the local face came in - not necessarily the latest received data packet, which is why we need to grab the stored value from the data structure)
+      serviceLatency = m_SDservTracker[rxedDataNameAndHash]["faceOUT"][lowestFace]["serviceLatency"];
+
+
+
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (before looking at allocation reuse): " << std::setw(2) << m_SDservTracker << '\n');
+
+
+      // Check if the WFnameAndHash exists in the currently allocated services and that it can be reused.
+      int64_t previousAllocationEFT = -1; // default value before we start analyzing EFTs.
+      int64_t previousAllocationStart = -1; // default value before we start analyzing EFTs.
+      std::string previousAllocationFace;
+      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"]["allocationReuse"] == 1)  // if we have it set up for doing allocation reuse of previously allocated slots
+      {
+        for (auto& serviceIterator : m_SDservTracker.items())
+        {
+          if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
+          {
+            if (m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["WFnameAndHash"] == futureWFnameAndHashString)
+            {
+              // If this node doesn't use caching and the previously allocated service finishes later than when the WF interest for this latest iteration of the service would arrive, then we reuse the already allocated version.
+              // An extra PIT entry will be added and will be able to be satisfied once the already allocated service runs.
+              // If this node uses caching (content store), then we just look for the best previously allocated slot (any end time is OK to reuse)
+              // m_cs.size() gives us the number of currently cached data packets. m_cs.getLimit() give us the cache size.
+              //if (m_cs.getLimit() > 0 || m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] > WFinterestRxedTime)
+              if (m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"] > allInputsReceivedEFT) // only reuse a slot if it starts after all inputs for this service have been received. This way, if the previous allocation is removed, we can truly still use this one.
+              {
+                NFD_LOG_DEBUG("NFDServiceDiscovery scheduling with no caching - Found a way to potentially reuse allocation for " << futureWFnameAndHashString << ", which was scheduled to finish at: " << m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"] << ", with serviceLatency = " << serviceLatency);
+                if (previousAllocationEFT == -1 || previousAllocationEFT > m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"]) // now we look for the lowest EFT of the previously allocated slots (look for the best one).
+                {
+                  previousAllocationEFT = m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"];
+                  previousAllocationStart = m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"];
+                  previousAllocationFace = m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["face"];
+                }
+              }
+            }
+          }
+        }
+      }
+
+
+      // Next, we will compare using the already allocated slot that matched above vs scheduling from scratch
+      // so we determine what the new EFT would be after scheduling (could be seriously delayed more if node is very busy)
+      int64_t earliestStartPossible = -1;
+      int64_t earliestEndPossible = -1;
+
+
+      NFD_LOG_DEBUG("NFDServiceDiscovery, parsing all scheduled items into vector for sorting...");
+      // parse all scheduled items into vector (so we can later sort them)
+      std::vector<Service> scheduledVector;
+      for (auto& serviceIterator : m_SDservTracker.items())
+      {
+        if (m_SDservTracker[serviceIterator.key()]["faceIN"].contains("serviceScheduling"))
+        {
+          scheduledVector.push_back({
+              serviceIterator.key(),
+              m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["inputsReadyTime"],
+              m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["start"],
+              m_SDservTracker[serviceIterator.key()]["faceIN"]["serviceScheduling"]["end"]
+          });
+        }
+      }
+
+      // Ensure sorted
+      std::sort(scheduledVector.begin(), scheduledVector.end(),
+                [](const Service& a, const Service& b){
+                    return a.start < b.start;
+                });
+/*
+      NFD_LOG_DEBUG("NFDServiceDiscovery, sorted scheduled items: ");
+      for (size_t i = 0; i < scheduledVector.size(); i++)
+      {
+        NFD_LOG_DEBUG("  item " << i << " name: " << scheduledVector[i].name << ", start: " << scheduledVector[i].start << ", end: " << scheduledVector[i].end);
+      }
+*/
+
+
+      bool spotFound = false;
+      // 0. check if no other service has been scheduled yet
+      if (scheduledVector.empty())
+      {
+        earliestStartPossible = lowestEFT;
+        earliestEndPossible = lowestEFT + serviceLatency;
+        spotFound = true;
+        NFD_LOG_DEBUG("NFDServiceDiscovery scheduling - vector was empty (no existing scheduled services). Can insert at beginning. earliestStartPossible: " << earliestStartPossible << ", + serviceLatency: " << serviceLatency << " = earliestEndPossible: " << earliestEndPossible);
+      }
+
+      // 1. check before first existing service
+      else if (lowestEFT + serviceLatency <= scheduledVector[0].start)
+      {
+        earliestStartPossible = lowestEFT;
+        earliestEndPossible = lowestEFT + serviceLatency;
+        spotFound = true;
+        NFD_LOG_DEBUG("NFDServiceDiscovery scheduling - Can insert before first existing service. earliestStartPossible: " << earliestStartPossible << ", earliestEndPossible: " << earliestEndPossible);
+      }
+
+      // 2. check between existing services
+      else
+      {
+        for (size_t i = 0; i + 1 < scheduledVector.size(); i++)
+        {
+            int64_t earliest = std::max(lowestEFT, scheduledVector[i].end);
+            int64_t gapEnd = scheduledVector[i+1].start;
+            if (earliest + serviceLatency <= gapEnd)
+            {
+              earliestStartPossible = earliest;
+              earliestEndPossible = earliest + serviceLatency;
+              spotFound = true;
+              NFD_LOG_DEBUG("NFDServiceDiscovery scheduling - Can insert between existing services. earliestStartPossible: " << earliestStartPossible << ", earliestEndPossible: " << earliestEndPossible);
+              break;
+            }
+        }
+      }
+
+      if (spotFound == false)
+      {
+        // 3. no gap big enough for this service -> schedule after the last existing service
+        int64_t start = std::max(lowestEFT, scheduledVector.back().end);
+        earliestStartPossible = start;
+        earliestEndPossible = start + serviceLatency;
+        spotFound = true;
+        NFD_LOG_DEBUG("NFDServiceDiscovery scheduling - Can insert after last existing service. earliestStartPossible: " << earliestStartPossible << ", earliestEndPossible: " << earliestEndPossible);
+      }
+
+
+      NFD_LOG_DEBUG("NFDServiceDiscovery re-evaluating lowest EFT after potential scheduling - earliestEndPossible: " << earliestEndPossible << ", lowestNonLocalEFT: " << lowestNonLocalEFT);
+
+      NFD_LOG_DEBUG("NFDServiceDiscovery - previousAllocationEFT: " << previousAllocationEFT);
+
+
+
+
+      // There are THREE options. 1) Use previous allocation. 2) Use new allocation locally. 3) Use non-local Face.
+      // Pick the earliest EFT of the three.
+      // If using a previous allocation, we create a replicated allocation slot again so that any schedulerRelease messages will only release a single slot without breaking dependencies for the services that were reusing that slot.
+      // If using a previous allocation, there is no need to add a new FIB entry.
+      if (previousAllocationEFT != -1 && previousAllocationEFT <= earliestEndPossible)
+      {
+        NFD_LOG_DEBUG("NFDServiceDiscovery - reusing an allocation spot from a previous scheduled service instance.");
+        lowestEFT = previousAllocationEFT;
+
+        // creating a copy of the allocated slot (as done below) prevents reused allocations from disappearing when a schedulerRelease message is received for a different version of the allocated slot. A slot is truly only release if no other versions of a service require it.
+        if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
+        {
+          NFD_LOG_ERROR("NFD SD Forwarding ERROR!! This service has already been scheduled!!!!");
+        }
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["WFnameAndHash"] = futureWFnameAndHashString;
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = allInputsReceivedEFT;
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] = previousAllocationStart;
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] = previousAllocationEFT;
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["face"] = previousAllocationFace;
+        // print info level message with node id, start and stop time, so process script can see it
+        auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+        NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << rxedDataNameAndHash << " scheduled on node " << (*node).GetId() << " starting at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] << " and ending at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] << " nanoseconds). This is an allocation reuse.");
+        //lowestFace = previousAllocationLowestFace; // if we are reusing a previous allocation, its lowestFace will be the local face, which won't require a FIB entry to be created.
+//NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure for just this service (on Data after scheduled): " << '\n' << rxedDataNameAndHash << '\n' << std::setw(2) << m_SDservTracker[rxedDataNameAndHash] << '\n');
+      }
+
+      // Then re-evaluate if running locally is still the lowest EFT (or if it's our only choice - in which case lowestNonLocalEFT would still be -1).
+      else if ((earliestEndPossible < lowestNonLocalEFT) || (lowestNonLocalEFT == -1)) // if yes, then schedule it locally
+      {
+        if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("serviceScheduling"))
+        {
+          NFD_LOG_ERROR("NFD SD Forwarding ERROR!! This service has already been scheduled!!!!");
+        }
+        NFD_LOG_DEBUG("NFDServiceDiscovery - SCHEDULING TO RUN LOCALLY!!!");
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["WFnameAndHash"] = futureWFnameAndHashString;
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["inputsReadyTime"] = allInputsReceivedEFT;
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] = earliestStartPossible;
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] = earliestEndPossible;
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["face"] = lowestFace;
+        lowestEFT = earliestEndPossible;
+        //lowestFace = lowestFace; // if we are here, lowestFace will be the local face already.
+
+        // print info level message with node id, start and stop time, so process script can see it
+        auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+        NFD_LOG_INFO("NFDServiceDiscovery - SDresourceAllocation: Service " << rxedDataNameAndHash << " scheduled on node " << (*node).GetId() << " starting at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["start"] << " and ending at " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["serviceScheduling"]["end"] << " nanoseconds).");
+
+//NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure for just this service (on Data after scheduled): " << '\n' << rxedDataNameAndHash << '\n' << std::setw(2) << m_SDservTracker[rxedDataNameAndHash] << '\n');
+        if (earliestStartPossible > allInputsReceivedEFT)
+        {
+          NFD_LOG_DEBUG("NFDServiceDiscovery - FYI: inputs are arriving before allocation slot!!");
+        }
+
+        // send schedulerRelease message to each face where the same service results may have come from - they are no longer needed to run elsewhere since the local EFT is lower.
+        //sendSchedulerReleaseInterestUpstream(rxedDataNameAndHash, lowestFace);
+
+      }
+      else // Running locally is no longer the lowest EFT, so don't schedule the task locally and instead use the other face (lowestNonLocalFace)
+      {
+        // update lowestEFT and lowestFace variables to be the non-local one (with lowestNonLocalEFT)
+        NFD_LOG_DEBUG("NFDServiceDiscovery - NOT SCHEDULING, RUNNING ELSEWHERE UPSTREAM!!!");
+        lowestEFT = lowestNonLocalEFT;
+        lowestFace = lowestNonLocalFace;
+      }
+
+
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after scheduled): " << std::setw(2) << m_SDservTracker << '\n');
+
+
+
+
+    }
+    else
+    {
+      NFD_LOG_DEBUG("NFDServiceDiscovery - lowest cost face is not local. No need to schedule anything here.");
+    }
+
+
+    // send schedulerRelease messages to each face (except the lowest cost face) where the same service results may have come from - they are no longer needed to run elsewhere other than the lowest cost face.
+    sendSchedulerReleaseInterestUpstream(rxedDataNameAndHash, lowestFace);
+
+    NFD_LOG_DEBUG("NFDServiceDiscovery - scheduling done");
+
+  } // end if resourceAllocation == 1
+
+
+
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data, before FIB entry analysis): " << std::setw(2) << m_SDservTracker << '\n');
+
+
+
+
+  NFD_LOG_DEBUG("NFDServiceDiscovery - generating FIB entry now...");
+
+  // GENERATE NEW FIB ENTRY
+
+  // create the FIB entry, so that when the workflow runs, we route through the face that has the lowest EFT.
+  // The node will record the lowest EFT cost in the FIB by creating a new table entry using the workflow pDAG name (not the serviceDiscovery pDAG name).
+  // The cost will be EFT in nano-seconds. This EFT is units of time after the initial interest is generated.
+  //auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+  if (lowestEFT > 0)
+  {
+
+    Face* lowestCostFace;
+    for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+    {
+      lowestCostFace = &*it;
+      if (std::to_string(lowestCostFace->getId()) == lowestFace)
+      {
+        break;
+      }
+    }
+
+
+
+/*
+old m_FibOwnerTracker = {
+"/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
+    "fibEntryExists": 0/1,                              // if any of the faceIDs below claim a fibOwner, this value will be 1, otherwise 0. Represents the actual FIB entry existing or not.
+    "/service1/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+      "faceOUT": {
+        "faceID3": {                                    // faceID where the interest has been forwarded to
+            "EFT": 3,                                   // 3ms is the EFT upstream
+            "fibOwner": 0                               // tells us if this is the entry that currently defined the FIB entry. Only one per /service1/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
+        },
+        "faceID4": {                                    // faceID where the interest has been forwarded to
+            "EFT": 2,                                   // 2ms is the EFT upstream
+            "fibOwner": 1                               // tells us if this is the entry that currently defined the FIB entry. Only one per /service1/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
+        },
+        "faceID5": {                                    // faceID where the interest has been forwarded to
+            "EFT": -1                                   // default value is -1 (data packet not received yet)
+            "fibOwner": 0                               // tells us if this is the entry that currently defined the FIB entry. Only one per /service1/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
+        }
+      }
+    }
+    "/service1/faceInIdString2&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+      "faceOUT": {
+        "faceID3": {                                    // faceID where the interest has been forwarded to
+            "EFT": 6,                                   // this is the EFT upstream
+            "fibOwner": 0                               // tells us if this is the entry that currently defined the FIB entry. Only one per /service1/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
+        },
+        "faceID5": {                                    // faceID where the interest has been forwarded to
+            "EFT": -1                                   // default value is -1 (data packet not received yet)
+            "fibOwner": 0                               // tells us if this is the entry that currently defined the FIB entry. Only one per /service1/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
+        }
+      }
+    }
+}
+}
+
+
+
+old m_FibOwnerTracker = {
+"/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
+    "/service1/faceInIdString1&pDAG_param_hash": 0,     // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+                                                            // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
+    "/service1/faceInIdString2&pDAG_param_hash": 1,     // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+                                                            // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
+    "/service1/faceInIdString3&pDAG_param_hash": 0      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+                                                            // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
+},
+"/service2/WFpDAG_param_hash": {                        // key has full name service/pDAG
+    "/service2/faceInIdString1&pDAG_param_hash": 1,     // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+                                                            // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
+    "/service2/faceInIdString2&pDAG_param_hash": 0      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+                                                            // value tells us if this is the entry that currently defined the FIB entry. Only one per /serviceX/WFpDAG_param_hash can be true at a time, and it will be the one with the lowest EFT.
+},
+"/service3/WFpDAG_param_hash": {                        // key has full name service/pDAG
+    etc...
+}
+}
+
+
+
+m_FibOwnerTracker = {
+"/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
+    "/service1/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+        "eft": 6,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+        "faceID": "260",                                    // faceID of the face where this EFT can be achieved
+        "faceType": "local"                               // local or non-local
+    }
+    "/service1/faceInIdString2&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+        "eft": 7,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+        "faceID": "262",                                    // faceID of the face where this EFT can be achieved
+        "faceType": "non-local"                           // local or non-local
+    }
+    "/service1/faceInIdString3&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+        "eft": 9,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+        "faceID": "258",                                    // faceID of the face where this EFT can be achieved
+        "faceType": "non-local"                           // local or non-local
+    }
+},
+"/service2/WFpDAG_param_hash": {                        // key has full name service/pDAG
+    "/service2/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+        "eft": 4,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+        "faceID": "260",                                    // faceID of the face where this EFT can be achieved
+        "faceType": "local"                               // local or non-local
+    }
+    "/service2/faceInIdString2&pDAG_param_hash": {      // key has full name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
+        "eft": 3,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
+        "faceID": "258",                                    // faceID of the face where this EFT can be achieved
+        "faceType": "non-local"                           // local or non-local
+    }
+},
+"/service3/WFpDAG_param_hash": {                        // key has full name service/pDAG
+    etc...
+}
+}
+
+
+
+*/
+
+
+
+
+    // make value of this specific rxedDataNameAndHash = lowestEFT
+    m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["eft"] = lowestEFT;
+    m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceID"] = lowestFace;
+    if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+    {
+      m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceType"] = "local";
+    }
+    if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+    {
+      m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceType"] = "non-local";
+    }
+
+    // Iterate through all Service Discovery paths tracking this workflow entry, and see what the lowest EFT for this WF name and hash currently is, so that we can update the FIB entry.
+    uint64_t wfLowestEft = std::numeric_limits<uint64_t>::max();
+    std::string wfLowestFaceID = "";
+    std::string wfLowestFaceType = "";
+
+    const auto& pathsMap = m_FibOwnerTracker[futureWFnameAndHashString];
+    for (auto it = pathsMap.begin(); it != pathsMap.end(); ++it) {
+      const auto& pathData = it.value();
+
+      // Ensure all required fields exist in this inner entry to prevent crashes
+      if (pathData.contains("eft") && pathData.contains("faceID") && pathData.contains("faceType")) {
+        uint64_t currentEft = pathData["eft"].get<uint64_t>();
+
+        // Keep track of the absolute lowest EFT entry
+        if (currentEft < wfLowestEft) {
+          wfLowestEft = currentEft;
+          wfLowestFaceID = pathData["faceID"].get<std::string>();
+          wfLowestFaceType = pathData["faceType"].get<std::string>();
+        }
+      }
+    }
+
+    // if it is a local face (to an application - to a locally hosted service), we don't create the FIB entry, and instead rely on the 0 cost regular FIB entry from the service itself.
+      // this is because the recorded face with lowest EFT is for the serviceDiscovery service's face, not the actual workflow service's face. Each application gets its own local face.
+    if (wfLowestFaceType == "local")
+    {
+      // remove entry
+      NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry and skipping creating FIB entry for " << futureWFnameAndHashString << " since lowest EFT is achieved on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
+      fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
+      if (exact != nullptr) {
+        m_fib.erase(futureWFnameAndHash);
+        NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
+      }
+    }
+    if (wfLowestFaceType == "non-local")
+    {
+      // remove entry
+      NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry for " << futureWFnameAndHashString << " and creating updated entry afterwards.");
+      fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
+      if (exact != nullptr) {
+        m_fib.erase(futureWFnameAndHash);
+        NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
+      }
+
+      // create new entry
+      NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is NOT local. Going to try to add FIB entry.");
+      fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
+      Face* wfLowestCostFace;
+      for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)
+      {
+        wfLowestCostFace = &*it;
+        if (std::to_string(wfLowestCostFace->getId()) == wfLowestFaceID)
+        {
+          break;
+        }
+      }
+      m_fib.addOrUpdateNextHop(*entry, *wfLowestCostFace, wfLowestEft);
+    }
+
+  }
+  else
+  {
+    NFD_LOG_DEBUG("NFDServiceDiscovery - skipping generating FIB entry since lowest EFT is -1.");
+  }
+
+
+
+/*
+  // if it is a local face (to an application - to a locally hosted service), we don't create the FIB entry, and instead rely on the 0 cost regular FIB entry from the service itself.
+    // this is because the recorded face with lowest EFT is for the serviceDiscovery service's face, not the actual workflow service's face. Each application gets its own local face.
+  if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+  {
+    NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is local. Going to try to delete FIB entry if it has no owner. This is for WF name " << futureWFnameAndHashString);
+    // if there is an existing FIB entry for this name&pDAG, remove it. We need to forward to this local face using regular FIB entry with just service name and cost 0.
+
+    // If we are doing allocation, then we can't just delete the entry if it exists. We may have several "active" requests with unique paths. Only the current path that this data packet was for has finished being analyzed.
+    //      Other paths may still be optimal, but since they all share the same futureWFnameAndHash for each face, removing this one would remove the other one(s) for that face too.
+    //      Look into perhaps keeping a local custom fib where we can store the rxedDataNameAndHash too. If we no longer need the fib entry (cuz it's not optimal), we can then check and see if there
+    //      are still other fib entries for this futureWFnameAndHash on that same face, and if there are, we don't remove the actual FIB entry. We only remove it once there are no more entries in the custom FIB for that particular face.
+
+
+
+    // make value of this specific rxedDataNameAndHash = lowestEFT
+    m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash] = lowestEFT;
+
+    // Optional Cleanup: Erase the specific path string entirely if it's no longer tracking an active owner. Otherwise, after a long time, this data structure will just keep growing indefinitely.
+    // m_FibOwnerTracker[futureWFnameAndHashString].erase(rxedDataNameAndHash);
+
+    //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_FibOwnerTracker data structure: " << std::setw(2) << m_FibOwnerTracker << '\n');
+    // check if any other values for this futureWFnameAndHash are still non-zero. If all are zero (no owners), then remove real FIB entry
+    bool has_active_owner = false;
+    if (m_FibOwnerTracker.contains(futureWFnameAndHashString))
+    {
+      for (auto& [service, value] : m_FibOwnerTracker[futureWFnameAndHashString].items())
+      {
+        if (value != 0) {
+          has_active_owner = true;
+          NFD_LOG_DEBUG("NFDServiceDiscovery, FIB entry has active owner (not deleting entry)");
+          break; 
+        }
+      }
+    }
+
+    if (has_active_owner == false)
+    {
+      NFD_LOG_DEBUG("NFDServiceDiscovery, skipping creating FIB entry for " << futureWFnameAndHashString << " since it is on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
+//NFD_LOG_INFO("NFDServiceDiscovery, skipping creating FIB entry for " << futureWFnameAndHashString << " since it is on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
+      fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
+      if (exact != nullptr) {
+        m_fib.erase(futureWFnameAndHash);
+        NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
+//NFD_LOG_INFO("NFDServiceDiscovery, entry for " << futureWFnameAndHashString << " removed from FIB. This is for rxedDataNameAndHash: " << rxedDataNameAndHash << "\n");
+      }
+    }
+  }
+
+  // otherwise, if it is a non-local face, we would be going out to another NFD node, and thus we create a new FIB entry with that non-local face.
+  if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+  {
+    NFD_LOG_DEBUG("NFDServiceDiscovery, lowestCostFace is NOT local. Going to try to add FIB entry.");
+    fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
+    m_fib.addOrUpdateNextHop(*entry, *lowestCostFace, lowestEFT);
+
+    // start by making all entries = 0 (we will set the active one afterwards)
+    //if (m_FibOwnerTracker.contains(futureWFnameAndHashString))
+    //{
+    //  for (auto& [service, value] : m_FibOwnerTracker[futureWFnameAndHashString].items())
+    //  {
+    //   value = 0;
+    //  }
+    //}
+
+
+    // make value of this specific rxedDataNameAndHash = lowestEFT. Creates if doesn't exist
+    m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash] = lowestEFT;
+    NFD_LOG_DEBUG("NFDServiceDiscovery, addNextHopRecord FIB entry for " << futureWFnameAndHashString << " added to FIB, with face " << lowestCostFace->getId() << ", and cost " << lowestEFT << ". This is for rxedDataNameAndHash: " << rxedDataNameAndHash << "\n");
+//NFD_LOG_INFO("NFDServiceDiscovery, addNextHopRecord entry for " << futureWFnameAndHashString << " added to FIB, with face " << lowestCostFace->getId() << ", and cost " << lowestEFT << ". This is for rxedDataNameAndHash: " << rxedDataNameAndHash << "\n");
+  }
+
+*/
+
+
+
+/*
+
+  if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+  {
+    NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry and skipping creating FIB entry for " << futureWFnameAndHashString << " since lowest EFT is achieved on a local face (instead rely on the 0 cost regular FIB entry from the service itself).");
+    fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
+    if (exact != nullptr) {
+      m_fib.erase(futureWFnameAndHash);
+      NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
+    }
+  }
+  if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
+  {
+    NFD_LOG_DEBUG("NFDServiceDiscovery, deleting any existing FIB entry for " << futureWFnameAndHashString << " and creating a new one based on the latest known lowestEFT (which is on non-local face).");
+    fib::Entry* exact = m_fib.findExactMatch(futureWFnameAndHash);
+    if (exact != nullptr) {
+      m_fib.erase(futureWFnameAndHash);
+      NFD_LOG_DEBUG("NFDServiceDiscovery, removed FIB entry for " << futureWFnameAndHashString);
+    }
+
+    NFD_LOG_DEBUG("NFDServiceDiscovery, adding FIB entry for " << futureWFnameAndHashString << " to non-local face.");
+    fib::Entry* entry = m_fib.insert(futureWFnameAndHash).first;
+    m_fib.addOrUpdateNextHop(*entry, *lowestCostFace, lowestEFT);
+  }
+
+*/
+
+  //this->printFibEntriesForPrefix(prefixNameString);
+
+
+  this->sendEFTdataUpdate(rxedDataNameAndHash, lowestEFT);
+
+
+
+
+  // clear m_SDservTracker faceOUT entry FOR THIS SERVICE ONLY, so that if a new interest is received, we go looking for inputs again
+  //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - removing m_SDservTracker entry for " << rxedDataNameAndHash << '\n');
+  //m_SDservTracker.erase(rxedDataNameAndHash); // erase the entire entry
+  //m_SDservTracker[rxedDataNameAndHash].erase("faceOUT"); // only erase the "faceOUT" portion, otherwise we would be removing the CPU scheduling information!
+  // we can't just erase the faceOUT portion, because I'm trying to use it for disseminating schedulerRelease messages too! So instead we just reset all the values.
+  // Actually, we can just leave the values as they were. This way, after schedule compaction, an update message will trigger EFT adjustments even if only one input is updated.
+
+
+  for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
+  {
+    m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["intTx"] = 0;
+    m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] = 0;
+    m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["linkDelay"] = -1;
+    m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"] = -1;
+  }
+
+  // This SD round is done. Bump the round counter so that any timeout still pending from it fires
+  // into a no-op, and drop the flag so the next round can arm a fresh one.
+  int64_t finishedRound = 0;
+  if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("sdRound"))
+  {
+    finishedRound = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["sdRound"];
+  }
+  m_SDservTracker[rxedDataNameAndHash]["faceIN"]["sdRound"] = finishedRound + 1;
+  m_SDservTracker[rxedDataNameAndHash]["faceIN"].erase("timeoutScheduled");
+  m_SDservTracker[rxedDataNameAndHash]["faceIN"].erase("timeoutArmedEFT");
+
+  // this round is over (either every EFT arrived on its own, or onSDinterestTimeout gave up on the
+  // rest) so any timeout still pending for it is now stale; cancel it instead of letting it fire as
+  // a no-op later.
+  auto pendingEvent = m_SDtimeoutEvents.find(rxedDataNameAndHash);
+  if (pendingEvent != m_SDtimeoutEvents.end())
+  {
+    ns3::Simulator::Cancel(pendingEvent->second);
+    m_SDtimeoutEvents.erase(pendingEvent);
+  }
+
+
+
+//NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after sending downstream): " << std::setw(2) << m_SDservTracker << '\n');
+
+}
+
+
+void
+Forwarder::onSDinterestTimeout(std::string rxedDataNameAndHash, std::string prefixNameString,
+                               std::string name1String, int64_t sdRound)
+{
+  auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+
+  if (!m_SDservTracker.contains(rxedDataNameAndHash) ||
+      !m_SDservTracker[rxedDataNameAndHash].contains("faceOUT"))
+  {
+    NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but the tracker entry is gone. Ignoring.");
+    return;
+  }
+
+  // If the round this timeout was armed in has already finished, every EFT either arrived on its own
+  // or was timed out back then, and the faceOUT flags have since been reset for the next round. Doing
+  // anything here would send a second, bogus EFT downstream.
+  int64_t currentRound = 0;
+  if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("sdRound"))
+  {
+    currentRound = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["sdRound"];
+  }
+  if (currentRound != sdRound)
+  {
+    NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but round " << sdRound << " already completed (now on round " << currentRound << "). Nothing to do.");
+    return;
+  }
+
+  // Any path that still has not reported an EFT is now guaranteed to be worse than the one we already
+  // have, so mark it as received with an invalid EFT of -1. That keeps it out of the lowest-EFT
+  // selection while still letting the allRxed accounting complete.
+  int timedOutFaces = 0;
+  for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
+  {
+    if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] != 1)
+    {
+      m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] = 1;
+      m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"] = -1;
+      timedOutFaces++;
+      NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout: no EFT arrived for " << rxedDataNameAndHash << " on face " << faceOutIterator.key() << " (node " << (*node).GetId() << "). Marking it received with an invalid EFT of -1.");
+    }
+  }
+
+  if (timedOutFaces == 0)
+  {
+    NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but every EFT had already arrived. Nothing to do.");
+    return;
+  }
+
+  NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout timed out " << timedOutFaces << " path(s) for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ". Proceeding as if all data had been received.");
+  this->processAllEFTsReceived(rxedDataNameAndHash, prefixNameString, name1String, false);
 }
 
 
