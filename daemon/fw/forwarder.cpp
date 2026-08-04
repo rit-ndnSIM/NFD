@@ -52,6 +52,9 @@ using json = nlohmann::json;
 #include <limits>
 #include <algorithm>
 
+#include "ns3/ptr.h"
+#include "ns3/random-variable-stream.h"
+
 namespace nfd {
 
 NFD_LOG_INIT(Forwarder);
@@ -66,6 +69,12 @@ static constexpr int64_t SD_TIMEOUT_MULTIPLIER = 1;
 // behavior of always waiting for every upstream face to report an EFT (or never resolving, if one is
 // dropped). Toggle and rebuild to A/B test the timeout's effect on SD latency.
 // static constexpr bool SD_TIMEOUT_ENABLED = true;  This is now controlled from the JSON scenario file, so we don't have to recompile every time we change it. Thus, we can easily compare with and without optimization
+
+// Fallback watchdog, armed when the SD interests are SENT rather than when data comes back. The real
+// timeout above can only ever be armed from inside onIncomingData, so a node that never receives any
+// SD data for a key (every upstream interest NACKed, dropped as a loop, or otherwise lost) would sit
+// with no timer at all. This one only reports that situation; it does not complete the round.
+static constexpr double SD_FALLBACK_TIMEOUT_S = 1.0;
 
 static Name
 getDefaultStrategyName()
@@ -151,7 +160,9 @@ m_SDservTracker = {
           "serviceDiscoveryStartTimeNS": <absolute SD start time>,      // set and initially sent by the consumer
           "workflowStartTimeNS": <absolute estimated WF start time>,    // set and initially sent by the consumer
           "WFinterestRxedTime": <absolute time when WF interest is estimated to be received>,   // Used for calculating EFT in caching nodes
-          "hopCounter": <value>,                      // Used for debugging to keep track of the number of hops taken so far (from consumer up to root nodes). Perhaps we can use this for scoped interest propagation at some point.
+          "hopCounter": <value>,                      // Used for debugging to keep track of the number of hops taken so far overall (from consumer up to root nodes). Perhaps we can use this for scoped interest propagation at some point.
+          "legHopCounter": <value>,                   // Used for debugging to keep track of the number of hops taken so far for this leg (from service to service). Perhaps we can use this for scoped interest propagation at some point.
+          "sdRound": <sdRound>,                       // Used to keep track of which SD round number this is in the experiment. With this information, we can avoid stale incoming EFT messages from propagating towards the consumer.
           "serviceScheduling": {                      // If the service has been scheduled to run in this node, we will see this entry. Otherwise, it won't exist
             "WFnameAndHash": "/service1/WFpDAG_param_hash",             // WFnameAndHash name could match with other ones below
             "inputsReadyTime": <absolute time when all inputs have been received>,
@@ -192,7 +203,9 @@ m_SDservTracker = {
           "serviceDiscoveryStartTimeNS": <absolute SD start time>,      // set and initially sent by the consumer
           "workflowStartTimeNS": <absolute estimated WF start time>,    // set and initially sent by the consumer
           "WFinterestRxedTime": <absolute time when WF interest is estimated to be received>,   // Used for calculating EFT in caching nodes
-          "hopCounter": <value>,                      // Used for debugging to keep track of the number of hops taken so far (from consumer up to root nodes). Perhaps we can use this for scoped interest propagation at some point.
+          "hopCounter": <value>,                      // Used for debugging to keep track of the number of hops taken so far overall (from consumer up to root nodes). Perhaps we can use this for scoped interest propagation at some point.
+          "legHopCounter": <value>,                   // Used for debugging to keep track of the number of hops taken so far for this leg (from service to service). Perhaps we can use this for scoped interest propagation at some point.
+          "sdRound": <sdRound>,                       // Used to keep track of which SD round number this is in the experiment. With this information, we can avoid stale incoming EFT messages from propagating towards the consumer.
           "serviceScheduling": {                      // If the service has been scheduled to run in this node, we will see this entry. Otherwise, it won't exist
             "WFnameAndHash": "/service1/WFpDAG_param_hash",             // WFnameAndHash name could match with other ones below
             "inputsReadyTime": <absolute time when all inputs have been received>,
@@ -577,21 +590,31 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     // check interestGenerationTimestamp. If we have already received an interest for the same service and timestamp, then simply respond with infinite EFT and do NOTHING ELSE (return)
     // an example name here would be: /nesco/serviceDiscovery2/service4/consumer18/params-sha256=eebcf58bb1c1df8641fa24663c9ce0eab3554a7b74e0981683dab5da2a65b284
     uint64_t interestGenerationTimestampNS = dagObject["interestGenerationTimestamp"];
+    // The leg origin is the node that spawned this branch of the exploration: the consumer for the very
+    // first leg, or the service-hosting node that asked for its upstream input. Each replica hosting a
+    // given service explores independently (heterogeneous makespans and queue loads mean their EFTs
+    // differ), so their legs must stay distinct here even in the rare case where two of them stamp the
+    // same generation timestamp. Copies of the SAME leg arriving by different paths still collapse.
+    // Note this is deliberately NOT dagObject["nodeID"], which the forwarder rewrites at every hop.
+    int64_t legOriginNodeID = dagObject.value("legOriginNodeID", (int64_t)-1);
     std::string consumerName = interest.getName().getPrefix(-1).getSubName(3,1).toUri(); // get rid of param digest, then starting at component 3, keep 1 component
-    for (const auto& record : m_receivedInterests)
+    if (prefixNameString == "/nesco")
     {
-      if (simpleName.toUri() == record.serviceName && consumerName == record.consumerName && interestGenerationTimestampNS == record.interestGenerationTimestampNS)
+      for (const auto& record : m_receivedInterests)
       {
-        NFD_LOG_DEBUG("NFDServiceDiscovery has already received this interest before: " << simpleName.toUri() << " - generated by " << consumerName << " at time: " << interestGenerationTimestampNS << ". Responding with invalid EFT of -1.");
-        std::string fullNameForResponse = prefixNameString + serviceDiscoveryNameString + rxedInterestNameAndHash;
-        //int64_t infiniteEFT = std::numeric_limits<int64_t>::max();
-        int64_t invalidEFT = -1;
-        this->sendEFTdataUpdateFromCache(fullNameForResponse, invalidEFT, ingress);
-        return;
+        if (simpleName.toUri() == record.serviceName && consumerName == record.consumerName && interestGenerationTimestampNS == record.interestGenerationTimestampNS && legOriginNodeID == record.legOriginNodeID)
+        {
+          NFD_LOG_DEBUG("NFDServiceDiscovery has already received this interest before: " << simpleName.toUri() << " - generated by " << consumerName << " at time: " << interestGenerationTimestampNS << " from leg origin node " << legOriginNodeID << ". Responding with invalid EFT of -1.");
+          std::string fullNameForResponse = prefixNameString + serviceDiscoveryNameString + rxedInterestNameAndHash;
+          //int64_t infiniteEFT = std::numeric_limits<int64_t>::max();
+          int64_t invalidEFT = -1;
+          this->sendEFTdataUpdateFromCache(fullNameForResponse, invalidEFT, ingress);
+          return;
+        }
       }
+      // record this interest so future duplicates are caught.
+      m_receivedInterests.push_back({simpleName.toUri(), consumerName, interestGenerationTimestampNS, legOriginNodeID});
     }
-    // record this interest so future duplicates are caught.
-    m_receivedInterests.push_back({simpleName.toUri(), consumerName, interestGenerationTimestampNS});
 
 
 
@@ -605,7 +628,16 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     int64_t hopCounter = dagObject["hopCounter"];
     hopCounter++;
     dagObject["hopCounter"] = hopCounter;
-   
+
+    // legHopCounter counts hops within THIS leg only. Unlike hopCounter, which accumulates all the way
+    // from the consumer through every service in the chain, this one is reset to 0 by whichever node
+    // spawns a leg (the consumer, or a service-hosting node asking for its upstream input). So it
+    // measures how far this particular request has wandered, independent of how deep in the DAG we are.
+    int64_t legHopCounter = dagObject.value("legHopCounter", (int64_t)0);
+    legHopCounter++;
+    dagObject["legHopCounter"] = legHopCounter;
+
+
     ns3::Time timeNow;
     timeNow = ns3::Simulator::Now();
     // Convert to integer in milliseconds and then to string
@@ -625,6 +657,8 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     shared_ptr<Interest> new_interest = make_shared<Interest>();
     new_interest->setName(interest.getName());
     new_interest->setApplicationParameters((const uint8_t *)dagStringParameter, length);
+    ns3::Ptr<ns3::UniformRandomVariable> rand = ns3::CreateObject<ns3::UniformRandomVariable>();
+    new_interest->setNonce(rand->GetValue(0, std::numeric_limits<uint32_t>::max()));
 
 
     //std::string justHash = interest.getName().getSubName(3,interest.getName().size()).toUri();
@@ -691,9 +725,19 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
           std::string currentConsumerName  = serviceData["faceIN"]["consumerName"].get<std::string>();
 
           // Match against the target workflow name and only if interests are from the same consumer application
-          if (currentWFnameAndHash == futureWFnameAndHashString && currentConsumerName == dagObject["consumerName"]) 
+          if (currentWFnameAndHash == futureWFnameAndHashString && currentConsumerName == dagObject["consumerName"])
           {
-            NFD_LOG_DEBUG("Found a match! SD Tracked Key: " << it.key() << " maps to received WF name: " << futureWFnameAndHashString << ". Dropping received interest.");
+            // We are not going to explore this interest, but we must still answer it. Returning silently
+            // leaves the downstream node with dataRx = 0 on the face it sent this interest out of, and
+            // nothing ever clears that: no data, no Nack handling that touches m_SDservTracker, and no
+            // retransmission in the consumer. That face stays outstanding forever and the round stalls.
+            // Replying with an invalid EFT of -1 lets the downstream node mark the face received (dataRx
+            // = 1) so its round can complete, exactly as the duplicate-interest check further above does.
+            //NFD_LOG_DEBUG("Found a match! SD Tracked Key: " << it.key() << " maps to received WF name: " << futureWFnameAndHashString << ". Not exploring it again, not responding with invalid EFT of -1 (just ignoring it)");
+            NFD_LOG_DEBUG("Found a match! SD Tracked Key: " << it.key() << " maps to received WF name: " << futureWFnameAndHashString << ". Not exploring it again, responding with invalid EFT of -1.");
+            std::string fullNameForResponse = prefixNameString + serviceDiscoveryNameString + rxedInterestNameAndHash;
+            int64_t invalidEFT = -1;
+            this->sendEFTdataUpdateFromCache(fullNameForResponse, invalidEFT, ingress);
             return;
           }
         }
@@ -719,6 +763,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
       m_SDservTracker[jsonName]["faceIN"]["scheduleCompaction"] = dagObject["scheduleCompaction"];  // we capture the setting here so that we know if we'll need to perform this later
       m_SDservTracker[jsonName]["faceIN"]["workflowStartTimeNS"] = WFstartTimeNS;                   // we capture the "WFstartTime" here so that we can use it for calculating time offsets later when data packets arrive.
       m_SDservTracker[jsonName]["faceIN"]["hopCounter"] = hopCounter;                   // we keep track of the hopCounter (from consumer to root service)
+      m_SDservTracker[jsonName]["faceIN"]["legHopCounter"] = legHopCounter;             // hops within this leg only (reset by whoever spawned the leg)
       m_SDservTracker[jsonName]["faceIN"]["WFinterestRxedTime"] = timeNowNS + WFstartTimeNS - SDstartTimeNS;  // we capture the "WFinterestRxedTime" here so that we can use it for allocation slot reuse calculations later.
       m_SDservTracker[jsonName]["faceIN"]["sdTimeoutComputationMultiplier"] = dagObject["sdTimeoutComputationMultiplier"];      // multiplier to see how long to estimate the computation time (against received EFT)
       //m_SDservTracker[jsonName]["faceIN"]["SDtoWFoffsetNS"] = WFstartTimeNS - SDstartTimeNS;  // constant offset mapping a time in the SD timeline onto the WF timeline, so an absolute EFT can be turned into a relative timeout delay later.
@@ -921,7 +966,28 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
       } // FIB iteration for loop
     //} // if face is local
-/*    
+
+      // Arm the fallback watchdog for this round. Unlike the real SD timeout, which can only be armed
+      // from inside onIncomingData, this one is armed at interest-send time, so it still fires for a key
+      // that never receives any SD data at all. It is purely diagnostic: it reports what is outstanding
+      // and does NOT complete the round or mark any face.
+      if (m_SDservTracker[jsonName].contains("faceOUT") && !m_SDservTracker[jsonName]["faceOUT"].empty())
+      {
+        int64_t fallbackRound = 0;
+        if (m_SDservTracker[jsonName]["faceIN"].contains("sdRound"))
+        {
+          fallbackRound = m_SDservTracker[jsonName]["faceIN"]["sdRound"];
+        }
+        // only one watchdog per key per round, no matter how many faces we just sent on
+        if (m_SDservTracker[jsonName]["faceIN"].value("fallbackArmedRound", (int64_t)-1) != fallbackRound)
+        {
+          m_SDservTracker[jsonName]["faceIN"]["fallbackArmedRound"] = fallbackRound;
+          m_SDfallbackEvents[jsonName] =
+            ns3::Simulator::Schedule(ns3::Seconds(SD_FALLBACK_TIMEOUT_S), &Forwarder::onSDfallbackTimeout, this,
+                                     jsonName, fallbackRound);
+        }
+      }
+/*
     // testing on 6/27/2026: if coming from non-local face, don't forward to every face. To avoid loops, we should only forward to the lowest cost face (just relay the interest).
     // Only the local SD application should generate multiple interests (to every possible hosted instance) and in this case we send to all possible faces
 
@@ -1367,7 +1433,8 @@ NFD_LOG_DEBUG("NDN-FC+ selected face=" << bestFaceId << " score=" << bestScore <
         }
       }
       // else: no FIB entry found, fall through to regular routing
-    }
+    
+    } // end prefixNameString == ndnfcp
 
 
 
@@ -1800,6 +1867,8 @@ Forwarder::sendShortcutOPTinterests(const Interest& interest, const FaceEndpoint
   {
     interestOPT->setApplicationParameters(interest.getApplicationParameters());
   }
+  ns3::Ptr<ns3::UniformRandomVariable> rand = ns3::CreateObject<ns3::UniformRandomVariable>();
+  interestOPT->setNonce(rand->GetValue(0, std::numeric_limits<uint32_t>::max()));
   
   char method = 2;
   if(method==1) // itereate through all faces of this router, send interest to all local faces
@@ -2067,6 +2136,8 @@ Forwarder::sendCsUpdateInterest(const Data& data)
   //interestCsUpdate->setApplicationParameters(csNameApplicationParameters);
 
   interestCsUpdate->setApplicationParameters((const uint8_t *)newCsNameString, length);
+  ns3::Ptr<ns3::UniformRandomVariable> rand = ns3::CreateObject<ns3::UniformRandomVariable>();
+  interestCsUpdate->setNonce(rand->GetValue(0, std::numeric_limits<uint32_t>::max()));
 
 
   char method = 1;
@@ -2194,18 +2265,45 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     // single generated interest.
     if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())].contains("sentInRound"))
     {
-      int64_t sentInRound = m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["sentInRound"];
+      auto& thisFaceOut = m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())];
+      int64_t sentInRound = thisFaceOut["sentInRound"];
       int64_t currentRound = 0;
       if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("sdRound"))
       {
         currentRound = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["sdRound"];
       }
-      if (sentInRound != currentRound)
+
+      // First discriminator: the face still carries the round tag from a send that predates the round
+      // we are now on, so nothing has re-sent on it since that round closed.
+      bool staleRound = (sentInRound != currentRound);
+
+      // Second discriminator, needed once the face HAS been re-sent in the current round: that re-send
+      // overwrote sentInRound, so the round tag alone can no longer tell a late reply from a fresh one.
+      // A reply that genuinely answers the current round's interest cannot have been transmitted
+      // upstream before we sent that interest, so compare the data's txTime against our recorded intTx.
+      bool staleTxTime = false;
+      int64_t dataTxTimeNS = -1;
+      int64_t sentAtNS = thisFaceOut.value("intTx", (int64_t)0);
+      if (!staleRound && sentAtNS > 0)
+      {
+        std::string probeString = (const char *)data.getContent().value();
+        json probeContents = json::parse(probeString);
+        if (probeContents.contains("txTime"))
+        {
+          dataTxTimeNS = probeContents["txTime"];
+          staleTxTime = (dataTxTimeNS < sentAtNS);
+        }
+      }
+
+      if (staleRound || staleTxTime)
       {
         auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
-        NFD_LOG_DEBUG("NFDServiceDiscovery - stale SD data for " << rxedDataNameAndHash << " on face " << ingress.face.getId()
-                     << " (node " << (*node).GetId() << "): it answers round " << sentInRound
-                     << " but we are now on round " << currentRound << ". Dropping it.");
+        NFD_LOG_INFO("NFDServiceDiscovery - stale SD data for " << rxedDataNameAndHash << " on face " << ingress.face.getId()
+                     << " (node " << (*node).GetId() << "): "
+                     << (staleRound ? "it answers round " : "its txTime predates our interest for round ")
+                     << sentInRound << " but we are now on round " << currentRound
+                     << (staleTxTime ? (" (dataTxTime=" + std::to_string(dataTxTimeNS) + "ns < intTx=" + std::to_string(sentAtNS) + "ns)") : "")
+                     << ". Dropping it.");
         return;
       }
     }
@@ -2258,10 +2356,14 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
     if (prefixNameString == "/or3")
     {
+
+/*
       // iterate through ALL items for the WF name and hash, not the SD name and hash
       // technically, we should have never generated more interests for the same WF name and hash request coming in from a different path. Any subsequent requests to this node should have been ignored, so these
       // extra SD name and hash entries would not exist, and the code below should be sufficient.
       // we extract the consumer name from the data name (/or3/serviceDiscovery2/serviceX/consumerY)
+
+      // ignore any subsequent EFT message for a given WFname. Only first one gets through
       std::string consumerName = data.getName().getPrefix(-1).getSubName(3,1).toUri(); // get rid of param digest, then starting at component 3, keep 1 component
       for (auto& serviceIterator : m_SDservTracker.items())
       {
@@ -2278,8 +2380,76 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
           }
         }
       }
+*/
 
-      NFD_LOG_DEBUG("NFDServiceDiscovery, first data packet for " << rxedDataNameAndHash << " has been received. Setting EFT to 99, setting up FIB entry, and generating data packet downstream");
+
+/*  Note: an EFT of -1 means the upstream node declined to explore the request (it already had an entry for the same workflow name, or had already seen the interest).
+ *  A declining node answers IMMEDIATELY, with no upstream traversal, so under or3's  first-arrival-wins policy a -1 almost always beats a genuine reply.
+ *
+ *  We mark an EFT of -1 (invalid) as received so we can tell the difference between "everyone declined" from "still waiting", but skip the FIB entry and keep waiting for a face that actually
+ *  explored, falling back to reporting -1 downstream only once every face had replied.
+ */
+
+      int64_t or3RxedEFT = -1;
+      {
+        std::string or3ContentString = (const char *)data.getContent().value();
+        json or3Contents = json::parse(or3ContentString);
+        if (or3Contents.contains("EFT"))
+        {
+          or3RxedEFT = or3Contents["EFT"];
+        }
+      }
+
+      uint32_t numEntries = 0;
+      if (or3RxedEFT == -1)
+      {
+        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] = 1;
+        m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["EFT"] = -1;
+
+        // Check if all branches have returned an EFT data message
+        int or3AllRxed = 1;
+        for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
+        {
+          numEntries++;
+          if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] != 1)
+          {
+            or3AllRxed = 0;
+          }
+        }
+
+        // if other branches are still being explored
+        if (or3AllRxed == 0)
+        {
+          NFD_LOG_DEBUG("NFDServiceDiscovery, data packet for " << rxedDataNameAndHash << " on face " << ingress.face.getId() << " carries an invalid EFT of -1 (upstream declined). Not usable for the FIB, still waiting on other faces.");
+          return;
+        }
+
+        NFD_LOG_DEBUG("NFDServiceDiscovery, every face (" << numEntries << " total faces) for " << rxedDataNameAndHash << " responded with an invalid EFT of -1. Nothing left to explore, so reporting -1 downstream. THIS SHOULD NOT HAPPEN!");
+        this->sendEFTdataUpdate(rxedDataNameAndHash, -1);
+
+        // reset things for the next SD
+        int64_t or3AllInvalidRound = 0;
+        if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("sdRound"))
+        {
+          or3AllInvalidRound = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["sdRound"];
+        }
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["sdRound"] = or3AllInvalidRound + 1;
+        m_SDservTracker[rxedDataNameAndHash]["faceIN"]["WFnameAndHash"] = "";
+        return;
+      }
+
+
+
+
+      if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] == 0)
+      {
+        NFD_LOG_DEBUG("NFDServiceDiscovery, a valid EFT data packet for " << rxedDataNameAndHash << " has been received. Setting EFT to 99, setting up FIB entry, and generating data packet downstream");
+      }
+      if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] == 1)
+      {
+        NFD_LOG_INFO("NFDServiceDiscovery, a repeated EFT data packet for " << rxedDataNameAndHash << " has been received. Setting EFT to 99, setting up FIB entry, and generating data packet downstream. THIS SHOULD NOT HAPPEN!");
+      }
+
 
       m_SDservTracker[rxedDataNameAndHash]["faceOUT"][std::to_string(ingress.face.getId())]["dataRx"] = 1;
       // just use 99 (dummy value) for the EFT. This will be used for the FIB entry cost
@@ -2313,7 +2483,25 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
       // forward the packet further downstream!!
       this->sendEFTdataUpdate(rxedDataNameAndHash, 99);
 
+
+
+      // This entry has now answered downstream, so this round is done for it. Bump its round the same
+      // way processAllEFTsReceived does for the nesco path, so that data still arriving on this entry's
+      // OTHER faces is recognised as belonging to a finished round and dropped by the stale check at the
+      // top of this handler. Without this, each additional face that reports gets treated as another
+      // "first data packet" and answers downstream again: in debugmeOR3, 40% of entries answered more
+      // than once, up to 16 times for a single entry, which is what the consumer sees as duplicate SD data.
+      // Every SD round gets a fresh tracker key (the params hash embeds that round's timestamps), so the
+      // next round starts from sdRound 0 again and is unaffected by this.
+
       // reset things for the next SD
+      int64_t or3FinishedRound = 0;
+      if (m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("sdRound"))
+      {
+        or3FinishedRound = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["sdRound"];
+      }
+      m_SDservTracker[rxedDataNameAndHash]["faceIN"]["sdRound"] = or3FinishedRound + 1;
+
 /*
       for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
       {
@@ -2464,6 +2652,7 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
         auto pendingEvent = m_SDtimeoutEvents.find(rxedDataNameAndHash);
         if (pendingEvent != m_SDtimeoutEvents.end())
         {
+          NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout cancelling pending event for " << rxedDataNameAndHash << " since we now have a lower EFT and want a tighter timeout to replace it instead of waiting for the old one.");
           ns3::Simulator::Cancel(pendingEvent->second);
         }
 
@@ -2506,12 +2695,13 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
         // log the raw slack rather than the clamped one, so a negative value (the fastest path is
         // already due in WF terms, and the timeout will fire immediately) stays visible in the log
         auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
-        NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout: Service " << rxedDataNameAndHash
+        NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout: Service " << rxedDataNameAndHash
                     << (haveArmedTimeout ? " RE-armed" : " armed")
                     << " timeout on node " << (*node).GetId()
                     << " for round " << sdRound
                     << " (rxed " << numRxed << " so far)."
                     << " hopCounter = " << m_SDservTracker[rxedDataNameAndHash]["faceIN"]["hopCounter"]
+                    << " legHopCounter = " << m_SDservTracker[rxedDataNameAndHash]["faceIN"].value("legHopCounter", (int64_t)-1)
                     << " EFT = " << eftNS << "ns,"
                     << " slack = " << slackNS << "ns, "
                     << " eft_ld = " << eft_ld << "ns, "
@@ -2522,6 +2712,28 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
           ns3::Simulator::Schedule(ns3::NanoSeconds(timeoutNS), &Forwarder::onSDinterestTimeout, this,
                                    rxedDataNameAndHash, prefixNameString, name1String, sdRound);
       }
+    }
+    else if (sdTimeoutComputationMultiplier > -1 && allRxed == 0 && eftNS <= 0 &&
+             !m_SDservTracker[rxedDataNameAndHash]["faceIN"].contains("timeoutScheduled"))
+    {
+      // NO TIMER ARMED (case 1 of 2): SD data arrived, but its EFT is invalid (-1), so there is no
+      // basis for computing a timeout duration and the arming block above is skipped. Faces are still
+      // outstanding and nothing is scheduled for this key, so unless a LATER data packet carries a
+      // valid EFT, this round can only ever be completed by the remaining faces replying on their own.
+      // (Case 2 of 2 - no SD data arriving at all - is reported by onSDfallbackTimeout instead.)
+      auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+      int64_t outstandingFaces = 0;
+      for (auto& faceOutIterator : m_SDservTracker[rxedDataNameAndHash]["faceOUT"].items())
+      {
+        if (m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] != 1)
+        {
+          outstandingFaces++;
+        }
+      }
+      NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout: NO TIMER ARMED for " << rxedDataNameAndHash
+                   << " on node " << (*node).GetId() << ". Data arrived on face " << ingress.face.getId()
+                   << " with an invalid EFT (" << eftNS << "), so no timeout could be computed. "
+                   << outstandingFaces << " face(s) still outstanding and nothing is scheduled for this key.");
     }
 
 
@@ -3571,14 +3783,79 @@ m_FibOwnerTracker = {
   auto pendingEvent = m_SDtimeoutEvents.find(rxedDataNameAndHash);
   if (pendingEvent != m_SDtimeoutEvents.end())
   {
+    NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout cancelling pending event for " << rxedDataNameAndHash << " since this round is over (either every EFT arrived on its own, or the timeout gave up on the rest). Pending timeouts are now stale.");
     ns3::Simulator::Cancel(pendingEvent->second);
     m_SDtimeoutEvents.erase(pendingEvent);
+  }
+
+  // the diagnostic watchdog for this round is stale too, so it does not report a round that completed
+  auto pendingFallback = m_SDfallbackEvents.find(rxedDataNameAndHash);
+  if (pendingFallback != m_SDfallbackEvents.end())
+  {
+    ns3::Simulator::Cancel(pendingFallback->second);
+    m_SDfallbackEvents.erase(pendingFallback);
   }
 
 
 
 //NFD_LOG_DEBUG("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data after sending downstream): " << std::setw(2) << m_SDservTracker << '\n');
 
+}
+
+
+void
+Forwarder::onSDfallbackTimeout(std::string jsonName, int64_t sdRound)
+{
+  auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+
+  if (!m_SDservTracker.contains(jsonName) || !m_SDservTracker[jsonName].contains("faceOUT"))
+  {
+    return; // tracker entry is gone, nothing to report
+  }
+
+  // if the round this watchdog belongs to has already finished, there is nothing to report
+  int64_t currentRound = 0;
+  if (m_SDservTracker[jsonName]["faceIN"].contains("sdRound"))
+  {
+    currentRound = m_SDservTracker[jsonName]["faceIN"]["sdRound"];
+  }
+  if (currentRound != sdRound)
+  {
+    return;
+  }
+
+  // collect the faces we sent an interest to that still have not reported
+  std::string outstanding;
+  int outstandingCount = 0;
+  for (auto& faceOutIterator : m_SDservTracker[jsonName]["faceOUT"].items())
+  {
+    auto& thisFaceOut = m_SDservTracker[jsonName]["faceOUT"][faceOutIterator.key()];
+    if (thisFaceOut.value("dataRx", 0) != 1)
+    {
+      if (outstandingCount > 0)
+      {
+        outstanding += ", ";
+      }
+      outstanding += "face " + faceOutIterator.key()
+                   + " (intTx=" + std::to_string(thisFaceOut.value("intTx", (int64_t)0))
+                   + "ns, sentInRound=" + std::to_string(thisFaceOut.value("sentInRound", (int64_t)-1))
+                   + ", EFT=" + std::to_string(thisFaceOut.value("EFT", (int64_t)-1)) + ")";
+      outstandingCount++;
+    }
+  }
+
+  if (outstandingCount == 0)
+  {
+    return; // every face reported, the round just has not been finalized by this path
+  }
+
+  bool haveArmedTimeout = m_SDservTracker[jsonName]["faceIN"].contains("timeoutScheduled");
+  NFD_LOG_INFO("NFDServiceDiscovery - SDfallback: after " << SD_FALLBACK_TIMEOUT_S << "s, round " << sdRound
+               << " for " << jsonName << " on node " << (*node).GetId() << " is still incomplete."
+               << " inName = " << m_SDservTracker[jsonName]["faceIN"].value("inName", std::string("<none>"))
+               << ", WFnameAndHash = " << m_SDservTracker[jsonName]["faceIN"].value("WFnameAndHash", std::string("<none>"))
+               << ", realTimeoutArmed = " << (haveArmedTimeout ? "yes" : "NO")
+               << ", outstanding faces (" << outstandingCount << "): " << outstanding);
 }
 
 
@@ -3591,7 +3868,7 @@ Forwarder::onSDinterestTimeout(std::string rxedDataNameAndHash, std::string pref
   if (!m_SDservTracker.contains(rxedDataNameAndHash) ||
       !m_SDservTracker[rxedDataNameAndHash].contains("faceOUT"))
   {
-    NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but the tracker entry is gone. Ignoring.");
+    NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but the tracker entry is gone. Ignoring.");
     return;
   }
 
@@ -3605,7 +3882,7 @@ Forwarder::onSDinterestTimeout(std::string rxedDataNameAndHash, std::string pref
   }
   if (currentRound != sdRound)
   {
-    NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but round " << sdRound << " already completed (now on round " << currentRound << "). Nothing to do.");
+    NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but round " << sdRound << " already completed (now on round " << currentRound << "). Nothing to do.");
     return;
   }
 
@@ -3620,17 +3897,17 @@ Forwarder::onSDinterestTimeout(std::string rxedDataNameAndHash, std::string pref
       m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] = 1;
       m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"] = -1;
       timedOutFaces++;
-      NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout: no EFT arrived for " << rxedDataNameAndHash << " on face " << faceOutIterator.key() << " (node " << (*node).GetId() << "). Marking it received with an invalid EFT of -1.");
+      NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout: no EFT arrived for " << rxedDataNameAndHash << " on face " << faceOutIterator.key() << " (node " << (*node).GetId() << "). Marking it received with an invalid EFT of -1.");
     }
   }
 
   if (timedOutFaces == 0)
   {
-    NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but every EFT had already arrived. Nothing to do.");
+    NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but every EFT had already arrived. Nothing to do.");
     return;
   }
 
-  NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout timed out " << timedOutFaces << " path(s) for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ". Proceeding as if all data had been received.");
+  NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout timed out " << timedOutFaces << " path(s) for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ". Proceeding as if all data had been received.");
   this->processAllEFTsReceived(rxedDataNameAndHash, prefixNameString, name1String, false);
 }
 
@@ -4084,6 +4361,8 @@ Forwarder::sendSchedulerReleaseInterestUpstream(const std::string nameAndHash, c
   strcpy(newAppParamString, appParamString.c_str());
   size_t length = strlen(newAppParamString);
   interestSchedulerRelease->setApplicationParameters((const uint8_t *)newAppParamString, length);
+  ns3::Ptr<ns3::UniformRandomVariable> rand = ns3::CreateObject<ns3::UniformRandomVariable>();
+  interestSchedulerRelease->setNonce(rand->GetValue(0, std::numeric_limits<uint32_t>::max()));
 
   bool done = false;
   for (FaceTable::const_iterator it = m_faceTable.begin(); it != m_faceTable.end(); ++it)

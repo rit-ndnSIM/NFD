@@ -67,6 +67,10 @@ struct ReceivedInterestRecord
   std::string serviceName;
   std::string consumerName;
   uint64_t interestGenerationTimestampNS;
+  int64_t legOriginNodeID; // node that spawned this leg (the consumer, or the service-hosting node that
+                           // asked for its upstream input). Two hosting nodes exploring the same service
+                           // are separate legs and must not be deduped against each other, even if they
+                           // happen to stamp the same generation timestamp.
 };
 
 
@@ -317,6 +321,16 @@ private:
   onSDinterestTimeout(std::string rxedDataNameAndHash, std::string prefixNameString,
                       std::string name1String, int64_t sdRound);
 
+  /** \brief diagnostic watchdog, armed when the SD interests are sent
+   *
+   *  Reports an SD round that is still incomplete after SD_FALLBACK_TIMEOUT_S, listing the faces that
+   *  never reported. Unlike onSDinterestTimeout this is armed at send time, so it still fires for a key
+   *  that never receives any SD data at all and therefore never gets a real timeout armed. It only
+   *  logs - it does not mark faces or complete the round.
+   */
+  void
+  onSDfallbackTimeout(std::string jsonName, int64_t sdRound);
+
 
   void
   printFibEntriesForPrefix(std::string prefixToPrint);
@@ -399,6 +413,7 @@ private:
   shared_ptr<Face>   m_csFace;
   json m_SDservTracker; // with this data structure, we can keep track of WHICH SD data packets have arrived, the faces (downstream and upstream), the EFT, upstream link delay, as well as service scheduling.
   std::map<std::string, ns3::EventId> m_SDtimeoutEvents; // keyed by rxedDataNameAndHash: the currently-armed SDtimeout event (if any), so a newer, lower EFT can cancel and replace it.
+  std::map<std::string, ns3::EventId> m_SDfallbackEvents; // keyed by the same name: the diagnostic watchdog armed when the SD interests were sent, cancelled once the round completes.
   std::map<std::string, std::map<nfd::FaceId, std::vector<int64_t>>> m_ndnfcpCallHistory; // m_ndnfcpCallHistory["/serviceName"][faceId] = list of callTimestamps (ns) for NDN-FC+ per-face call frequency
   json m_FibOwnerTracker; // with this data structure, we can keep track of WHICH SD unique path name owns the true FIB entry so that we can remove the FIB entry once no one owns it. (multiple SD unique path names can be related to the same FIB entry, but only one is the optimal one that actually owns it)
   std::mutex m_interestMutex;  // mutex to account for interest processing (can only process one interest at a time)
