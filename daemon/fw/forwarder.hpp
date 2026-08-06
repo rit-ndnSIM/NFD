@@ -45,6 +45,9 @@
 #include <map>
 #include <vector>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
+#include <functional>
 
 #include <nlohmann/json.hpp>
 #include "ns3/event-id.h"
@@ -62,15 +65,35 @@ struct Service {
     int duration() const { return end - start; }
 };
 
-struct ReceivedInterestRecord
+// Identity of an SD interest for duplicate detection: which service, which consumer, and which leg
+// spawned it. legOriginNodeID is the node that started this branch of the exploration (the consumer, or
+// the service-hosting node that asked for its upstream input). Two hosting nodes exploring the same
+// service are separate legs and must not be deduped against each other, even if they happen to stamp
+// the same generation timestamp. Used as the key of m_receivedInterests; the generation timestamps seen
+// for that key are the mapped value.
+struct ReceivedInterestKey
 {
   std::string serviceName;
   std::string consumerName;
-  uint64_t interestGenerationTimestampNS;
-  int64_t legOriginNodeID; // node that spawned this leg (the consumer, or the service-hosting node that
-                           // asked for its upstream input). Two hosting nodes exploring the same service
-                           // are separate legs and must not be deduped against each other, even if they
-                           // happen to stamp the same generation timestamp.
+  int64_t legOriginNodeID;
+
+  bool operator==(const ReceivedInterestKey& other) const
+  {
+    return legOriginNodeID == other.legOriginNodeID &&
+           serviceName == other.serviceName &&
+           consumerName == other.consumerName;
+  }
+};
+
+struct ReceivedInterestKeyHash
+{
+  std::size_t operator()(const ReceivedInterestKey& k) const
+  {
+    std::size_t h = std::hash<std::string>{}(k.serviceName);
+    h ^= std::hash<std::string>{}(k.consumerName) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    h ^= std::hash<int64_t>{}(k.legOriginNodeID) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    return h;
+  }
 };
 
 
@@ -422,7 +445,11 @@ private:
   bool m_resourceBusy;  // mutex to account for service execution in the node (CPU usage - only run one service at a time)
   uint64_t m_resourceBusyTime; // this keeps track of how many NS the CPU will be busy for. When a service is added to the queue, its makespan is added to this variable. When a service is completed, its makspan is subtracted.
   std::deque<ResourceRequest> m_resourceQueue;
-  std::vector<ReceivedInterestRecord> m_receivedInterests; // if this grows too large, swap to std::unordered_map<std::string, std::unordered_set<uint64_t>> keyed by service name for O(1) average lookup
+  // SD interests already seen, for duplicate detection. Keyed by (service, consumer, leg origin) with the
+  // set of generation timestamps seen for that key, so a lookup is O(1) average instead of a linear scan
+  // of every interest ever received. This grows for the whole run and is never cleared, so with ~150k SD
+  // interests the old std::vector scan was ~10^10 string comparisons and dominated the simulator runtime.
+  std::unordered_map<ReceivedInterestKey, std::unordered_set<uint64_t>, ReceivedInterestKeyHash> m_receivedInterests;
 
   // allow Strategy (base class) to enter pipelines
   friend class fw::Strategy;

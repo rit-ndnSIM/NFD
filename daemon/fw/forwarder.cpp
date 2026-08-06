@@ -61,6 +61,27 @@ NFD_LOG_INIT(Forwarder);
 
 const std::string CFG_FORWARDER = "forwarder";
 
+// How many hex characters of a params-sha256 digest to keep when storing it as "prevHash" inside the
+// SD interest's application parameters. 16 hex chars = 64 bits. Must match the value used by the
+// service discovery application (cabeee-dag-serviceDiscovery-app.cpp), since both write "prevHash".
+static constexpr size_t PREVHASH_DIGEST_HEX_CHARS = 16;
+
+// Shorten the params-sha256 digest inside a name&hash string, leaving the readable name part alone:
+//   /service3/consumer18/params-sha256=ae14...b06   ->   /service3/consumer18/params-sha256=ae142c59aaf789ef
+// Returns the input unchanged if it carries no digest component.
+static std::string
+truncateNameDigest(const std::string& nameAndHash)
+{
+  static const std::string digestTag = "params-sha256=";
+  auto pos = nameAndHash.find(digestTag);
+  if (pos == std::string::npos)
+  {
+    return nameAndHash;
+  }
+  auto keep = pos + digestTag.size() + PREVHASH_DIGEST_HEX_CHARS;
+  return (keep >= nameAndHash.size()) ? nameAndHash : nameAndHash.substr(0, keep);
+}
+
 // Multiplier applied to the projected slack when arming the service discovery timeout.
 // This allows us to add some buffer time if needed.
 static constexpr int64_t SD_TIMEOUT_MULTIPLIER = 1;
@@ -299,7 +320,7 @@ old m_FibOwnerTracker = {
 
 
 
-m_FibOwnerTracker = {
+old m_FibOwnerTracker = {
     "/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
         "/service1/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
             "eft": 6,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
@@ -334,6 +355,21 @@ m_FibOwnerTracker = {
     }
 }
 
+m_FibOwnerTracker = {
+"/service1/WFpDAG_param_hash": {                      // key has full WF name service/pDAG
+    "eft": 6,                                         // value tells us the lowest eft found so far. This entry with the lowest eft will be the one that "owns" the real FIB entry.
+    "faceID": "260",                                  // faceID of the face where this EFT can be achieved
+    "faceType": "local"                               // local or non-local
+},
+"/service2/WFpDAG_param_hash": {                      // key has full name service/pDAG
+    "eft": 4,                                         // value tells us the lowest eft found so far. This entry with the lowest eft will be the one that "owns" the real FIB entry.
+    "faceID": "260",                                  // faceID of the face where this EFT can be achieved
+    "faceType": "local"                               // local or non-local
+},
+"/service3/WFpDAG_param_hash": {                      // key has full name service/pDAG
+    etc...
+}
+}
 
 
 */
@@ -585,35 +621,37 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     json dagObject = json::parse(dagString);
 
     NFD_LOG_DEBUG("NFDServiceDiscovery received interest with name " << rxedInterestNameAndHash << " where prev name&hash was " << dagObject["prevHash"]);
+    NFD_LOG_DEBUG("NFDServiceDiscovery, received interest with name " << rxedInterestNameAndHash << " contains application parameters: " << dagString);
 
 
     // check interestGenerationTimestamp. If we have already received an interest for the same service and timestamp, then simply respond with infinite EFT and do NOTHING ELSE (return)
     // an example name here would be: /nesco/serviceDiscovery2/service4/consumer18/params-sha256=eebcf58bb1c1df8641fa24663c9ce0eab3554a7b74e0981683dab5da2a65b284
-    uint64_t interestGenerationTimestampNS = dagObject["interestGenerationTimestamp"];
+    uint64_t interestGenerationTimestampNS = dagObject["iGenTime"];
     // The leg origin is the node that spawned this branch of the exploration: the consumer for the very
     // first leg, or the service-hosting node that asked for its upstream input. Each replica hosting a
     // given service explores independently (heterogeneous makespans and queue loads mean their EFTs
     // differ), so their legs must stay distinct here even in the rare case where two of them stamp the
     // same generation timestamp. Copies of the SAME leg arriving by different paths still collapse.
     // Note this is deliberately NOT dagObject["nodeID"], which the forwarder rewrites at every hop.
-    int64_t legOriginNodeID = dagObject.value("legOriginNodeID", (int64_t)-1);
+    int64_t legOriginNodeID = dagObject.value("legNodeID", (int64_t)-1);
     std::string consumerName = interest.getName().getPrefix(-1).getSubName(3,1).toUri(); // get rid of param digest, then starting at component 3, keep 1 component
     if (prefixNameString == "/nesco")
     {
-      for (const auto& record : m_receivedInterests)
+      // One hash lookup instead of scanning every interest ever received. The dedup identity is unchanged
+      // (service + consumer + generation timestamp + leg origin); only the container differs.
+      ReceivedInterestKey rxedInterestKey{simpleName.toUri(), consumerName, legOriginNodeID};
+      auto& seenTimestamps = m_receivedInterests[rxedInterestKey];
+      if (seenTimestamps.count(interestGenerationTimestampNS) > 0)
       {
-        if (simpleName.toUri() == record.serviceName && consumerName == record.consumerName && interestGenerationTimestampNS == record.interestGenerationTimestampNS && legOriginNodeID == record.legOriginNodeID)
-        {
-          NFD_LOG_DEBUG("NFDServiceDiscovery has already received this interest before: " << simpleName.toUri() << " - generated by " << consumerName << " at time: " << interestGenerationTimestampNS << " from leg origin node " << legOriginNodeID << ". Responding with invalid EFT of -1.");
-          std::string fullNameForResponse = prefixNameString + serviceDiscoveryNameString + rxedInterestNameAndHash;
-          //int64_t infiniteEFT = std::numeric_limits<int64_t>::max();
-          int64_t invalidEFT = -1;
-          this->sendEFTdataUpdateFromCache(fullNameForResponse, invalidEFT, ingress);
-          return;
-        }
+        NFD_LOG_DEBUG("NFDServiceDiscovery has already received this interest before: " << simpleName.toUri() << " - generated by " << consumerName << " at time: " << interestGenerationTimestampNS << " from leg origin node " << legOriginNodeID << ". Responding with invalid EFT of -1.");
+        std::string fullNameForResponse = prefixNameString + serviceDiscoveryNameString + rxedInterestNameAndHash;
+        //int64_t infiniteEFT = std::numeric_limits<int64_t>::max();
+        int64_t invalidEFT = -1;
+        this->sendEFTdataUpdateFromCache(fullNameForResponse, invalidEFT, ingress);
+        return;
       }
       // record this interest so future duplicates are caught.
-      m_receivedInterests.push_back({simpleName.toUri(), consumerName, interestGenerationTimestampNS, legOriginNodeID});
+      seenTimestamps.insert(interestGenerationTimestampNS);
     }
 
 
@@ -623,19 +661,28 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     std::string faceInIdString = std::to_string(faceInId);
 
     dagObject["faceIN"] = faceInIdString;
-    dagObject["prevHash"] = rxedInterestNameAndHash; // adding the previous name&hash add the full "historical" path of where the interest has come from, trying to make it unique, although faces may have same ID on different nodes.
-    dagObject["consumerName"] = consumerName;
-    int64_t hopCounter = dagObject["hopCounter"];
+    // adding the previous name&hash adds the full "historical" path of where the interest has come from,
+    // trying to make it unique, although faces may have same ID on different nodes.
+    // We keep only the first 16 hex characters (64 bits) of the params-sha256 digest. prevHash is never
+    // parsed back anywhere - it is purely an opaque uniquifier that gets folded into THIS interest's own
+    // name digest - so the remaining 48 hex characters are pure wire overhead, re-sent on every hop of
+    // every leg. SHA-256 output is uniformly distributed, so the leading 64 bits are exactly as
+    // collision-resistant as any other 64-bit slice; leading is conventional and stays eyeball-matchable
+    // against a full digest in the logs. With a few thousand concurrent paths per (service, consumer,
+    // round) the birthday collision probability at 64 bits is on the order of 1e-12.
+    dagObject["prevHash"] = truncateNameDigest(rxedInterestNameAndHash);
+    dagObject["conName"] = consumerName;
+    int64_t hopCounter = dagObject["hops"];
     hopCounter++;
-    dagObject["hopCounter"] = hopCounter;
+    dagObject["hops"] = hopCounter;
 
     // legHopCounter counts hops within THIS leg only. Unlike hopCounter, which accumulates all the way
     // from the consumer through every service in the chain, this one is reset to 0 by whichever node
     // spawns a leg (the consumer, or a service-hosting node asking for its upstream input). So it
     // measures how far this particular request has wandered, independent of how deep in the DAG we are.
-    int64_t legHopCounter = dagObject.value("legHopCounter", (int64_t)0);
+    int64_t legHopCounter = dagObject.value("legHops", (int64_t)0);
     legHopCounter++;
-    dagObject["legHopCounter"] = legHopCounter;
+    dagObject["legHops"] = legHopCounter;
 
 
     ns3::Time timeNow;
@@ -657,6 +704,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     shared_ptr<Interest> new_interest = make_shared<Interest>();
     new_interest->setName(interest.getName());
     new_interest->setApplicationParameters((const uint8_t *)dagStringParameter, length);
+    delete[] dagStringParameter;
     ns3::Ptr<ns3::UniformRandomVariable> rand = ns3::CreateObject<ns3::UniformRandomVariable>();
     new_interest->setNonce(rand->GetValue(0, std::numeric_limits<uint32_t>::max()));
 
@@ -668,8 +716,8 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
 
 
 
-    int64_t WFstartTimeNS = dagObject["workflowStartTimeNS"];
-    int64_t SDstartTimeNS = dagObject["serviceDiscoveryStartTimeNS"];
+    int64_t WFstartTimeNS = dagObject["WFstartNS"];
+    int64_t SDstartTimeNS = dagObject["SDstartNS"];
 
 
 
@@ -695,6 +743,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
     shared_ptr<Interest> dummyInterest = make_shared<Interest>();
     dummyInterest->setName(futureWFnameAndHashString);
     dummyInterest->setApplicationParameters((const uint8_t *)WFdagStringParameter, lengthParam);
+    delete[] WFdagStringParameter;
     futureWFnameAndHash = dummyInterest->getName();
     futureWFnameAndHashString = futureWFnameAndHash.toUri();
 
@@ -725,7 +774,7 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
           std::string currentConsumerName  = serviceData["faceIN"]["consumerName"].get<std::string>();
 
           // Match against the target workflow name and only if interests are from the same consumer application
-          if (currentWFnameAndHash == futureWFnameAndHashString && currentConsumerName == dagObject["consumerName"])
+          if (currentWFnameAndHash == futureWFnameAndHashString && currentConsumerName == dagObject["conName"])
           {
             // We are not going to explore this interest, but we must still answer it. Returning silently
             // leaves the downstream node with dataRx = 0 on the face it sent this interest out of, and
@@ -753,19 +802,19 @@ if (timeNowNS > 2000000000) { // make sure we are only looking at WF interests (
       m_SDservTracker[jsonName]["faceIN"]["inID"] = faceInId;                     // we record the faceID
       m_SDservTracker[jsonName]["faceIN"]["inName"] = interest.getName().toUri(); // we record the original name as it came in, so we know what name to use when we respond with data downstream.
       m_SDservTracker[jsonName]["faceIN"]["WFnameAndHash"] = futureWFnameAndHashString;
-      m_SDservTracker[jsonName]["faceIN"]["consumerName"] = dagObject["consumerName"];
+      m_SDservTracker[jsonName]["faceIN"]["consumerName"] = dagObject["conName"];
       m_SDservTracker[jsonName]["faceIN"]["dag"] = dagObject["dag"];              // we capture the pDag here so that we can use it to generate the name we use for the FIB entry  we create later.
       m_SDservTracker[jsonName]["faceIN"]["head"] = dagObject["head"];            // we capture the "head" here so that we can use it to generate the name&hash we use for the FIB entry  we create later.
-      m_SDservTracker[jsonName]["faceIN"]["serviceDiscovery"] = dagObject["serviceDiscovery"];  // we capture the setting here so that we know if we'll need to perform this later
-      m_SDservTracker[jsonName]["faceIN"]["resourceUtilization"] = dagObject["resourceUtilization"];  // we capture the setting here so that we know if we'll need to perform this later
-      m_SDservTracker[jsonName]["faceIN"]["resourceAllocation"] = dagObject["resourceAllocation"];  // we capture the setting here so that we know if we'll need to perform this later
-      m_SDservTracker[jsonName]["faceIN"]["allocationReuse"] = dagObject["allocationReuse"];  // we capture the setting here so that we know if we'll need to perform this later
-      m_SDservTracker[jsonName]["faceIN"]["scheduleCompaction"] = dagObject["scheduleCompaction"];  // we capture the setting here so that we know if we'll need to perform this later
+      m_SDservTracker[jsonName]["faceIN"]["serviceDiscovery"] = dagObject["SDtype"];  // we capture the setting here so that we know if we'll need to perform this later
+      m_SDservTracker[jsonName]["faceIN"]["resourceUtilization"] = dagObject["RU"];  // we capture the setting here so that we know if we'll need to perform this later
+      m_SDservTracker[jsonName]["faceIN"]["resourceAllocation"] = dagObject["RA"];  // we capture the setting here so that we know if we'll need to perform this later
+      m_SDservTracker[jsonName]["faceIN"]["allocationReuse"] = dagObject["AR"];  // we capture the setting here so that we know if we'll need to perform this later
+      m_SDservTracker[jsonName]["faceIN"]["scheduleCompaction"] = dagObject["SC"];  // we capture the setting here so that we know if we'll need to perform this later
       m_SDservTracker[jsonName]["faceIN"]["workflowStartTimeNS"] = WFstartTimeNS;                   // we capture the "WFstartTime" here so that we can use it for calculating time offsets later when data packets arrive.
       m_SDservTracker[jsonName]["faceIN"]["hopCounter"] = hopCounter;                   // we keep track of the hopCounter (from consumer to root service)
       m_SDservTracker[jsonName]["faceIN"]["legHopCounter"] = legHopCounter;             // hops within this leg only (reset by whoever spawned the leg)
       m_SDservTracker[jsonName]["faceIN"]["WFinterestRxedTime"] = timeNowNS + WFstartTimeNS - SDstartTimeNS;  // we capture the "WFinterestRxedTime" here so that we can use it for allocation slot reuse calculations later.
-      m_SDservTracker[jsonName]["faceIN"]["sdTimeoutComputationMultiplier"] = dagObject["sdTimeoutComputationMultiplier"];      // multiplier to see how long to estimate the computation time (against received EFT)
+      m_SDservTracker[jsonName]["faceIN"]["sdTimeoutComputationMultiplier"] = dagObject["SDtimeoutCM"];      // multiplier to see how long to estimate the computation time (against received EFT)
       //m_SDservTracker[jsonName]["faceIN"]["SDtoWFoffsetNS"] = WFstartTimeNS - SDstartTimeNS;  // constant offset mapping a time in the SD timeline onto the WF timeline, so an absolute EFT can be turned into a relative timeout delay later.
     }
     //else // name already existed (this isn't the first interest)
@@ -2136,6 +2185,7 @@ Forwarder::sendCsUpdateInterest(const Data& data)
   //interestCsUpdate->setApplicationParameters(csNameApplicationParameters);
 
   interestCsUpdate->setApplicationParameters((const uint8_t *)newCsNameString, length);
+  delete[] newCsNameString;
   ns3::Ptr<ns3::UniformRandomVariable> rand = ns3::CreateObject<ns3::UniformRandomVariable>();
   interestCsUpdate->setNonce(rand->GetValue(0, std::numeric_limits<uint32_t>::max()));
 
@@ -2257,6 +2307,19 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
     bool updatedEFTmessage = false;
     NFD_LOG_DEBUG("NFDServiceDiscovery received data with name: " << rxedDataNameAndHash << " - faceID is: " << ingress.face.getId());
 
+    // No tracker entry means this round is already finished and its entry has been erased, so this is a
+    // straggler that arrived after we answered downstream. Drop it here. Without this check the code
+    // below would auto-vivify an empty entry (nlohmann operator[] inserts on a miss), skip the stale
+    // check because the face has no "sentInRound", and then throw converting a null
+    // "sdTimeoutComputationMultiplier" to float.
+    if (!m_SDservTracker.contains(rxedDataNameAndHash) ||
+        !m_SDservTracker[rxedDataNameAndHash].contains("faceIN"))
+    {
+      auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
+      NFD_LOG_DEBUG("NFDServiceDiscovery - SD data for " << rxedDataNameAndHash << " on face " << ingress.face.getId() << " (node " << (*node).GetId() << ") has no tracker entry, so that round is already done. Dropping it.");
+      return;
+    }
+
     // Drop Data that answers an interest from an SD round that has already finished. When a round
     // completes, processAllEFTsReceived resets dataRx/intTx/EFT so the tracker key can be reused by the
     // next round, which leaves a late reply indistinguishable from a fresh one. Without this check such a
@@ -2323,30 +2386,30 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 
 
 
-    // create name&pDAG just like it will be created by the regular consumer when the real workflow runs. The application parameters are different (less of them), so the hash will be different.
-    ndn::Name futureWFnameAndHash;
-    futureWFnameAndHash = (data.getName()).getPrefix(-1); // remove the last component of the name (the parameter digest) so we have just the raw name
-    futureWFnameAndHash = futureWFnameAndHash.getSubName(2,1); // remove the zeroeth component of the name (/nesco), and the first component of the name (/serviceDiscovery). starting at component 2, keep 1 component
-    //std::string futureWFnameAndHashString = "/nesco" + futureWFnameAndHash.toUri();
-    std::string futureWFnameAndHashString = prefixNameString + futureWFnameAndHash.toUri();
-
-    json dagObject;
-    dagObject["dag"]  = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["dag"];
-    dagObject["head"] = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["head"];
-    std::string updatedDagString = dagObject.dump();
-    // in order to convert from std::string to a char[] datatype we do the following (https://stackoverflow.com/questions/7352099/stdstring-to-char):
-    char *dagStringParameter = new char[updatedDagString.length() + 1];
-    strcpy(dagStringParameter, updatedDagString.c_str());
-    size_t lengthParam = strlen(dagStringParameter);
-
-    shared_ptr<Interest> dummyInterest = make_shared<Interest>();
-    dummyInterest->setName(futureWFnameAndHashString);
-    dummyInterest->setApplicationParameters((const uint8_t *)dagStringParameter, lengthParam);
-    futureWFnameAndHash = dummyInterest->getName();
-    futureWFnameAndHashString = futureWFnameAndHash.toUri();
+    // The name&pDAG that the consumer will use when the real workflow runs was already built when this
+    // entry's SD interest came through (see where "WFnameAndHash" is stored in faceIN), and it is
+    // derived only from the DAG, the head and the service name - all of which are fixed for the life of
+    // the entry. So read the cached string back instead of rebuilding it.
+    //
+    // Rebuilding meant, on EVERY SD data packet: deep-copying the whole DAG into a fresh json, dump()ing
+    // it, a heap allocation plus strcpy plus strlen, constructing an Interest, running SHA-256 over the
+    // serialized DAG to get the parameters digest, and hex-encoding that digest back into a URI. Profiling
+    // showed exactly those costs (Sha256ComponentType::writeUri, and the nlohmann parser/serializer) as a
+    // significant share of simulator CPU. Reconstructing the Name from the cached URI still has to parse
+    // the digest component, but that is far cheaper than recomputing it.
+    //
+    // Safe because: the entry is guaranteed to exist (checked at the top of this handler), "WFnameAndHash"
+    // is written when the entry is created, and the only place it is cleared is immediately before the
+    // entry is erased on the or3 path, which is further down and unreachable without the entry existing.
+    std::string futureWFnameAndHashString =
+      m_SDservTracker[rxedDataNameAndHash]["faceIN"].value("WFnameAndHash", std::string(""));
+    ndn::Name futureWFnameAndHash(futureWFnameAndHashString);
 
 
     // TODO: package code above into separate function as shown below.
+
+    // TODO: setApplicationParameters has an overload taking a span, so we can pass updatedDagString directly (apply it everywhere in this code):
+    //interest->setApplicationParameters(reinterpret_cast<const uint8_t*>(updatedDagString.data()), updatedDagString.size());
 
     //futureWFnameAndHash = generateWFnameAndHash(const Name& SDname, std::string dag, std::string head);
     //futureWFnameAndHashString = futureWFnameAndHash.toUri();
@@ -2513,6 +2576,12 @@ Forwarder::onIncomingData(const Data& data, const FaceEndpoint& ingress)
 */
       m_SDservTracker[rxedDataNameAndHash]["faceIN"]["WFnameAndHash"] = "";
 
+      // Same reasoning as the nesco path: this entry has answered downstream and its key is never
+      // reused, so drop it rather than letting the tracker grow for the whole run. Data arriving later
+      // on this entry's other faces now finds no entry and is dropped at the top of this handler, which
+      // is the same outcome the sdRound bump above was giving it.
+      m_SDservTracker.erase(rxedDataNameAndHash);
+
       return;
 
     } // end if (or3)
@@ -2652,7 +2721,7 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
         auto pendingEvent = m_SDtimeoutEvents.find(rxedDataNameAndHash);
         if (pendingEvent != m_SDtimeoutEvents.end())
         {
-          NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout cancelling pending event for " << rxedDataNameAndHash << " since we now have a lower EFT and want a tighter timeout to replace it instead of waiting for the old one.");
+          NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout cancelling pending event for " << rxedDataNameAndHash << " since we now have a lower EFT and want a tighter timeout to replace it instead of waiting for the old one.");
           ns3::Simulator::Cancel(pendingEvent->second);
         }
 
@@ -2695,7 +2764,7 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
         // log the raw slack rather than the clamped one, so a negative value (the fastest path is
         // already due in WF terms, and the timeout will fire immediately) stays visible in the log
         auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
-        NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout: Service " << rxedDataNameAndHash
+        NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout: Service " << rxedDataNameAndHash
                     << (haveArmedTimeout ? " RE-armed" : " armed")
                     << " timeout on node " << (*node).GetId()
                     << " for round " << sdRound
@@ -2730,7 +2799,7 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
           outstandingFaces++;
         }
       }
-      NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout: NO TIMER ARMED for " << rxedDataNameAndHash
+      NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout: NO TIMER ARMED for " << rxedDataNameAndHash
                    << " on node " << (*node).GetId() << ". Data arrived on face " << ingress.face.getId()
                    << " with an invalid EFT (" << eftNS << "), so no timeout could be computed. "
                    << outstandingFaces << " face(s) still outstanding and nothing is scheduled for this key.");
@@ -2994,27 +3063,16 @@ void
 Forwarder::processAllEFTsReceived(std::string rxedDataNameAndHash, std::string prefixNameString,
                                   std::string name1String, bool updatedEFTmessage)
 {
-  // Rebuild the name&pDAG just like it will be created by the regular consumer when the real workflow
-  // runs. The service name is the first component of rxedDataNameAndHash, and the pDAG/head we stored
-  // when the SD interest came in supply the application parameters that produce the hash.
-  ndn::Name futureWFnameAndHash;
-  std::string futureWFnameAndHashString = prefixNameString + ndn::Name(rxedDataNameAndHash).getSubName(0,1).toUri();
-
-  json dagObject;
-  dagObject["dag"]  = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["dag"];
-  dagObject["head"] = m_SDservTracker[rxedDataNameAndHash]["faceIN"]["head"];
-  std::string updatedDagString = dagObject.dump();
-  // in order to convert from std::string to a char[] datatype we do the following (https://stackoverflow.com/questions/7352099/stdstring-to-char):
-  char *dagStringParameter = new char[updatedDagString.length() + 1];
-  strcpy(dagStringParameter, updatedDagString.c_str());
-  size_t lengthParam = strlen(dagStringParameter);
-
-  shared_ptr<Interest> dummyInterest = make_shared<Interest>();
-  dummyInterest->setName(futureWFnameAndHashString);
-  dummyInterest->setApplicationParameters((const uint8_t *)dagStringParameter, lengthParam);
-  delete[] dagStringParameter;
-  futureWFnameAndHash = dummyInterest->getName();
-  futureWFnameAndHashString = futureWFnameAndHash.toUri();
+  // The name&pDAG that the consumer will use when the real workflow runs was already built and cached in
+  // this entry's faceIN when its SD interest came through, so read it back rather than rebuilding it.
+  // See the matching comment in onIncomingData: rebuilding meant a deep copy of the DAG, a dump(), a heap
+  // allocation, a strcpy and a SHA-256, and it produces exactly the string stored here. This function is
+  // only ever called with an entry that exists (from the allRxed branch of onIncomingData, or from
+  // onSDinterestTimeout, both of which check first), and "WFnameAndHash" is written when the entry is
+  // created and only cleared on the or3 path, which never reaches this function.
+  std::string futureWFnameAndHashString =
+    m_SDservTracker[rxedDataNameAndHash]["faceIN"].value("WFnameAndHash", std::string(""));
+  ndn::Name futureWFnameAndHash(futureWFnameAndHashString);
 
   // recalled from the data structure further below, where the local face reported it
   int64_t serviceLatency = -1;
@@ -3518,7 +3576,7 @@ old m_FibOwnerTracker = {
 
 
 
-m_FibOwnerTracker = {
+old m_FibOwnerTracker = {
 "/service1/WFpDAG_param_hash": {                        // key has full WF name service/pDAG
     "/service1/faceInIdString1&pDAG_param_hash": {      // key has full SD name service/pDAG with locally modified param hash that includes input faceID (added right when interest is received)
         "eft": 6,                                         // value tells us the eft. The entry with the lowest eft will be the one that "owns" the real FIB entry.
@@ -3553,6 +3611,22 @@ m_FibOwnerTracker = {
 }
 }
 
+m_FibOwnerTracker = {
+"/service1/WFpDAG_param_hash": {                      // key has full WF name service/pDAG
+    "eft": 6,                                         // value tells us the lowest eft found so far. This entry with the lowest eft will be the one that "owns" the real FIB entry.
+    "faceID": "260",                                  // faceID of the face where this EFT can be achieved
+    "faceType": "local"                               // local or non-local
+},
+"/service2/WFpDAG_param_hash": {                      // key has full name service/pDAG
+    "eft": 4,                                         // value tells us the lowest eft found so far. This entry with the lowest eft will be the one that "owns" the real FIB entry.
+    "faceID": "260",                                  // faceID of the face where this EFT can be achieved
+    "faceType": "local"                               // local or non-local
+},
+"/service3/WFpDAG_param_hash": {                      // key has full name service/pDAG
+    etc...
+}
+}
+
 
 
 */
@@ -3560,39 +3634,24 @@ m_FibOwnerTracker = {
 
 
 
-    // make value of this specific rxedDataNameAndHash = lowestEFT
-    m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["eft"] = lowestEFT;
-    m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceID"] = lowestFace;
-    if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL)
+    // Keep only the best result ever seen for this WF name: if this path beat it, it becomes the new
+    // owner of the FIB entry. There is no need to remember the individual paths - the only question ever
+    // asked of this structure is "what is the lowest EFT for this WF name, and on which face", so we
+    // store that answer directly instead of storing every path and re-deriving it. Entries are replaced,
+    // never removed, so the structure stays bounded by the number of distinct WF names on this node.
+    if (!m_FibOwnerTracker.contains(futureWFnameAndHashString) ||
+        lowestEFT < m_FibOwnerTracker[futureWFnameAndHashString]["eft"].get<int64_t>())
     {
-      m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceType"] = "local";
+      m_FibOwnerTracker[futureWFnameAndHashString]["eft"] = lowestEFT;
+      m_FibOwnerTracker[futureWFnameAndHashString]["faceID"] = lowestFace;
+      m_FibOwnerTracker[futureWFnameAndHashString]["faceType"] =
+        (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_LOCAL) ? "local" : "non-local";
+      NFD_LOG_DEBUG("NFDServiceDiscovery, new lowest EFT for " << futureWFnameAndHashString << " is " << lowestEFT << " on face " << lowestFace << " (path " << rxedDataNameAndHash << "). It now owns the FIB entry.");
     }
-    if (lowestCostFace->getScope() == ndn::nfd::FACE_SCOPE_NON_LOCAL)
-    {
-      m_FibOwnerTracker[futureWFnameAndHashString][rxedDataNameAndHash]["faceType"] = "non-local";
-    }
 
-    // Iterate through all Service Discovery paths tracking this workflow entry, and see what the lowest EFT for this WF name and hash currently is, so that we can update the FIB entry.
-    uint64_t wfLowestEft = std::numeric_limits<uint64_t>::max();
-    std::string wfLowestFaceID = "";
-    std::string wfLowestFaceType = "";
-
-    const auto& pathsMap = m_FibOwnerTracker[futureWFnameAndHashString];
-    for (auto it = pathsMap.begin(); it != pathsMap.end(); ++it) {
-      const auto& pathData = it.value();
-
-      // Ensure all required fields exist in this inner entry to prevent crashes
-      if (pathData.contains("eft") && pathData.contains("faceID") && pathData.contains("faceType")) {
-        uint64_t currentEft = pathData["eft"].get<uint64_t>();
-
-        // Keep track of the absolute lowest EFT entry
-        if (currentEft < wfLowestEft) {
-          wfLowestEft = currentEft;
-          wfLowestFaceID = pathData["faceID"].get<std::string>();
-          wfLowestFaceType = pathData["faceType"].get<std::string>();
-        }
-      }
-    }
+    uint64_t wfLowestEft = m_FibOwnerTracker[futureWFnameAndHashString]["eft"].get<uint64_t>();
+    std::string wfLowestFaceID = m_FibOwnerTracker[futureWFnameAndHashString]["faceID"].get<std::string>();
+    std::string wfLowestFaceType = m_FibOwnerTracker[futureWFnameAndHashString]["faceType"].get<std::string>();
 
     // if it is a local face (to an application - to a locally hosted service), we don't create the FIB entry, and instead rely on the 0 cost regular FIB entry from the service itself.
       // this is because the recorded face with lowest EFT is for the serviceDiscovery service's face, not the actual workflow service's face. Each application gets its own local face.
@@ -3783,7 +3842,7 @@ m_FibOwnerTracker = {
   auto pendingEvent = m_SDtimeoutEvents.find(rxedDataNameAndHash);
   if (pendingEvent != m_SDtimeoutEvents.end())
   {
-    NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout cancelling pending event for " << rxedDataNameAndHash << " since this round is over (either every EFT arrived on its own, or the timeout gave up on the rest). Pending timeouts are now stale.");
+    NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout cancelling pending event for " << rxedDataNameAndHash << " since this round is over (either every EFT arrived on its own, or the timeout gave up on the rest). Pending timeouts are now stale.");
     ns3::Simulator::Cancel(pendingEvent->second);
     m_SDtimeoutEvents.erase(pendingEvent);
   }
@@ -3795,6 +3854,15 @@ m_FibOwnerTracker = {
     ns3::Simulator::Cancel(pendingFallback->second);
     m_SDfallbackEvents.erase(pendingFallback);
   }
+
+  // Drop the tracker entry now that this round has answered downstream. Every SD round produces a fresh
+  // key (the params hash covers that round's timestamps, prevHash and nodeID), so this entry will never
+  // be looked up again - measured: 20667 distinct keys, each armed exactly once, sdRound never above 0.
+  // Leaving them behind made m_SDservTracker grow for the whole run, which slows every keyed lookup and
+  // every full walk of the structure. Stragglers that arrive after this point find no entry and are
+  // dropped by the check at the top of the SD data handler.
+  m_SDservTracker.erase(rxedDataNameAndHash);
+
 
 
 
@@ -3868,7 +3936,7 @@ Forwarder::onSDinterestTimeout(std::string rxedDataNameAndHash, std::string pref
   if (!m_SDservTracker.contains(rxedDataNameAndHash) ||
       !m_SDservTracker[rxedDataNameAndHash].contains("faceOUT"))
   {
-    NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but the tracker entry is gone. Ignoring.");
+    NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but the tracker entry is gone. Ignoring.");
     return;
   }
 
@@ -3882,7 +3950,7 @@ Forwarder::onSDinterestTimeout(std::string rxedDataNameAndHash, std::string pref
   }
   if (currentRound != sdRound)
   {
-    NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but round " << sdRound << " already completed (now on round " << currentRound << "). Nothing to do.");
+    NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but round " << sdRound << " already completed (now on round " << currentRound << "). Nothing to do.");
     return;
   }
 
@@ -3897,17 +3965,17 @@ Forwarder::onSDinterestTimeout(std::string rxedDataNameAndHash, std::string pref
       m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["dataRx"] = 1;
       m_SDservTracker[rxedDataNameAndHash]["faceOUT"][faceOutIterator.key()]["EFT"] = -1;
       timedOutFaces++;
-      NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout: no EFT arrived for " << rxedDataNameAndHash << " on face " << faceOutIterator.key() << " (node " << (*node).GetId() << "). Marking it received with an invalid EFT of -1.");
+      NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout: no EFT arrived for " << rxedDataNameAndHash << " on face " << faceOutIterator.key() << " (node " << (*node).GetId() << "). Marking it received with an invalid EFT of -1.");
     }
   }
 
   if (timedOutFaces == 0)
   {
-    NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but every EFT had already arrived. Nothing to do.");
+    NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout fired for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ", but every EFT had already arrived. Nothing to do.");
     return;
   }
 
-  NFD_LOG_INFO("NFDServiceDiscovery - SDtimeout timed out " << timedOutFaces << " path(s) for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ". Proceeding as if all data had been received.");
+  NFD_LOG_DEBUG("NFDServiceDiscovery - SDtimeout timed out " << timedOutFaces << " path(s) for " << rxedDataNameAndHash << " on node " << (*node).GetId() << ". Proceeding as if all data had been received.");
   this->processAllEFTsReceived(rxedDataNameAndHash, prefixNameString, name1String, false);
 }
 
@@ -4282,7 +4350,7 @@ Forwarder::lockResourceQueueAdd(const std::string& serviceName, const Data& data
   m_resourceQueue.push_back(request);
 
   auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
-  NFD_LOG_INFO("NFDForwarder - WFresourceAllocation: Service " << serviceName << " queued on node " << (*node).GetId() << ". Queue size: " << m_resourceQueue.size());
+  NFD_LOG_DEBUG("NFDForwarder - WFresourceAllocation: Service " << serviceName << " queued on node " << (*node).GetId() << ". Queue size: " << m_resourceQueue.size());
 
   // 2. If the CPU is idling, kick off the processing immediately
   if (!m_resourceBusy)
@@ -4361,6 +4429,7 @@ Forwarder::sendSchedulerReleaseInterestUpstream(const std::string nameAndHash, c
   strcpy(newAppParamString, appParamString.c_str());
   size_t length = strlen(newAppParamString);
   interestSchedulerRelease->setApplicationParameters((const uint8_t *)newAppParamString, length);
+  delete[] newAppParamString;
   ns3::Ptr<ns3::UniformRandomVariable> rand = ns3::CreateObject<ns3::UniformRandomVariable>();
   interestSchedulerRelease->setNonce(rand->GetValue(0, std::numeric_limits<uint32_t>::max()));
 
