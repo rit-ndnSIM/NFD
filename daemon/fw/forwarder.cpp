@@ -2742,6 +2742,7 @@ NFD_LOG_INFO("\n\nNFDServiceDiscovery - m_SDservTracker data structure (on Data)
         }
         //int64_t slackNS = (eftNS - WFstartTimeNS)*2 - eft_ld*2; // how far the fastest known path finishes
         int64_t slackNS = (eftNS - WFstartTimeNS - eft_cpu_estimated)*2 - eft_ld*2; // how far the fastest known path finishes
+        // TODO: use this instead: int64_t slackNS = (eftNS - WFstartTimeNS - eft_cpu_estimated) - eft_ld*2; // how far the fastest known path finishes
         if (slackNS < 0)
         {
           slackNS = 0; // the fastest path is already due, so there is nothing left to wait for
@@ -4362,14 +4363,26 @@ Forwarder::lockResourceQueueAdd(const std::string& serviceName, const Data& data
 void
 Forwarder::processNextRequest()
 {
+  if (m_resourceBusy)
+  {
+    // A service is already executing here. Its request stays at the front of the queue for as long as
+    // it runs (it is only removed in freeResource), so without this guard a second entry into this
+    // function would dispatch that same front request all over again.
+    return;
+  }
+
   if (m_resourceQueue.empty())
   {
     return;
   }
 
+  // Peek at the request at the front of the FIFO queue, but leave it in place: it stays queued for the
+  // whole duration of its execution so that the duplicate check in lockResourceQueueAdd and the queue
+  // makespan sum used for the serviceDiscovery2 EFT both account for the service that is running now.
+
   // Grab the request at the front of the FIFO queue
   ResourceRequest nextRequest = m_resourceQueue.front();
-  m_resourceQueue.pop_front();
+  //m_resourceQueue.pop_front();
 
   m_resourceBusy = true;
 
@@ -4377,7 +4390,10 @@ Forwarder::processNextRequest()
   int64_t timeNowNS = timeNow.ToInteger(ns3::Time::NS);
   auto node = ::ns3::NodeList::GetNode(::ns3::Simulator::GetContext());
 
-  NFD_LOG_INFO("NFDForwarder - WFresourceAllocation: Service " << nextRequest.serviceName << " started running on node " << (*node).GetId() << ". Setting resourceBusy = true (resource locked at " << timeNowNS << " nanoseconds). Queue size: " << m_resourceQueue.size());
+  //NFD_LOG_INFO("NFDForwarder - WFresourceAllocation: Service " << nextRequest.serviceName << " started running on node " << (*node).GetId() << ". Setting resourceBusy = true (resource locked at " << timeNowNS << " nanoseconds). Queue size: " << m_resourceQueue.size());
+  // Queue size is reported as the number of requests still WAITING, i.e. excluding the one just started,
+  // so that it keeps the same meaning it had when the request was popped before running.
+  NFD_LOG_INFO("NFDForwarder - WFresourceAllocation: Service " << nextRequest.serviceName << " started running on node " << (*node).GetId() << ". Setting resourceBusy = true (resource locked at " << timeNowNS << " nanoseconds). Queue size: " << (m_resourceQueue.size() - 1));
 
   // Schedule release exactly after the request's specific makespan
   ns3::Simulator::Schedule(ns3::NanoSeconds(nextRequest.makespanNS), 
@@ -4391,6 +4407,7 @@ Forwarder::freeResource(const std::string& serviceName, const Data& data, const 
   auto dataPtr = std::make_shared<Data>(data);
   auto ingressPtr = std::make_shared<FaceEndpoint>(ingress);
 
+  m_resourceQueue.pop_front();
   // Mark resource as free
   m_resourceBusy = false;
 
